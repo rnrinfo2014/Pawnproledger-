@@ -24,6 +24,15 @@ The PawnPro API now includes comprehensive CRUD operations for pledge management
 - **PUT** `/pledges/{pledge_id}`
 - **Body**: PledgeCreate schema
 
+### Update Pledge with Items
+- **PUT** `/pledges/{pledge_id}/with-items`
+- **Body**: PledgeUpdateWithItems schema
+- **Features**: 
+  - Updates pledge details
+  - Replaces all existing pledge items with new ones
+  - Atomic transaction (all changes or no changes)
+  - Validates customer, scheme, and jewell design references
+
 ### Delete Pledge
 - **DELETE** `/pledges/{pledge_id}`
 - **Cascades**: Deletes all associated pledge items
@@ -96,6 +105,45 @@ The PawnPro API now includes comprehensive CRUD operations for pledge management
 }
 ```
 
+### Pledge Update with Items
+```json
+{
+  "customer_id": 1,
+  "scheme_id": 1,
+  "pledge_date": "2025-09-09",
+  "due_date": "2025-10-09",
+  "item_count": 2,
+  "gross_weight": 12.0,
+  "net_weight": 11.5,
+  "document_charges": 150.0,
+  "first_month_interest": 75.0,
+  "total_loan_amount": 6000.0,
+  "final_amount": 6225.0,
+  "company_id": 1,
+  "status": "active",
+  "is_move_to_bank": false,
+  "remarks": "Updated pledge with new items",
+  "pledge_items": [
+    {
+      "jewell_design_id": 1,
+      "jewell_condition": "Excellent",
+      "gross_weight": 6.0,
+      "net_weight": 5.8,
+      "net_value": 3000.0,
+      "remarks": "Gold ring"
+    },
+    {
+      "jewell_design_id": 2,
+      "jewell_condition": "Good",
+      "gross_weight": 6.0,
+      "net_weight": 5.7,
+      "net_value": 3000.0,
+      "remarks": "Gold chain"
+    }
+  ]
+}
+```
+
 ## Features
 - ✅ Auto-generated pledge numbers with scheme prefixes
 - ✅ Company-based data isolation
@@ -104,6 +152,7 @@ The PawnPro API now includes comprehensive CRUD operations for pledge management
 - ✅ JWT authentication required
 - ✅ Comprehensive CRUD operations
 - ✅ RESTful API design
+- ✅ Atomic pledge and items update
 
 ## Usage Example
 ```javascript
@@ -125,6 +174,52 @@ const pledgeData = {
 
 fetch('/pledges/', {
   method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + token
+  },
+  body: JSON.stringify(pledgeData)
+});
+
+// Update pledge with new items (replaces all existing items)
+const pledgeUpdateData = {
+  customer_id: 1,
+  scheme_id: 1,
+  pledge_date: "2025-09-09",
+  due_date: "2025-10-09",
+  item_count: 2,
+  gross_weight: 12.0,
+  net_weight: 11.5,
+  document_charges: 150.0,
+  first_month_interest: 75.0,
+  total_loan_amount: 6000.0,
+  final_amount: 6225.0,
+  company_id: 1,
+  status: "active",
+  is_move_to_bank: false,
+  remarks: "Updated pledge with new items",
+  pledge_items: [
+    {
+      jewell_design_id: 1,
+      jewell_condition: "Excellent",
+      gross_weight: 6.0,
+      net_weight: 5.8,
+      net_value: 3000.0,
+      remarks: "Gold ring"
+    },
+    {
+      jewell_design_id: 2,
+      jewell_condition: "Good", 
+      gross_weight: 6.0,
+      net_weight: 5.7,
+      net_value: 3000.0,
+      remarks: "Gold chain"
+    }
+  ]
+};
+
+fetch('/pledges/1/with-items', {
+  method: 'PUT',
   headers: {
     'Content-Type': 'application/json',
     'Authorization': 'Bearer ' + token
