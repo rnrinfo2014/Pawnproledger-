@@ -134,6 +134,9 @@ def create_tables_and_data():
 
             # Insert a rate for Gold (you can add more as needed)
             gold_type = db.query(JewellType).filter_by(type_name="Gold").first()
+            silver_type = db.query(JewellType).filter_by(type_name="Silver").first()
+            diamond_type = db.query(JewellType).filter_by(type_name="Diamond").first()
+            
             admin_user = db.query(User).filter(User.username == "admin").first()
             if gold_type and admin_user:
                 rate = JewellRate(date=date.today(), jewell_type_id=gold_type.id, rate=5000.0, created_by=admin_user.id)
@@ -145,10 +148,6 @@ def create_tables_and_data():
             from models import Scheme
             existing_schemes = db.query(Scheme).filter(Scheme.jewell_type_id == None).all()
             if existing_schemes:
-                gold_type = db.query(JewellType).filter_by(type_name="Gold").first()
-                silver_type = db.query(JewellType).filter_by(type_name="Silver").first()
-                diamond_type = db.query(JewellType).filter_by(type_name="Diamond").first()
-                
                 for scheme in existing_schemes:
                     if scheme.jewell_category.lower() == "gold" and gold_type:
                         scheme.jewell_type_id = gold_type.id
