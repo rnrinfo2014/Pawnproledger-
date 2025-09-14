@@ -13,20 +13,25 @@ from pathlib import Path
 from database import SessionLocal, get_db
 from auth import authenticate_user, create_access_token, Token, get_current_user, get_current_admin_user, get_password_hash
 from models import Company as CompanyModel, User as UserModel, MasterAccount as MasterAccountModel, VoucherMaster as VoucherMasterModel, LedgerEntry as LedgerEntryModel, Area as AreaModel, GoldSilverRate as GoldSilverRateModel, JewellDesign as JewellDesignModel, JewellCondition as JewellConditionModel, Scheme as SchemeModel, Customer as CustomerModel, Item as ItemModel, Pledge as PledgeModel, PledgeItem as PledgeItemModel, JewellType as JewellTypeModel, JewellRate as JewellRateModel
+from config import settings
 
-app = FastAPI(title="PawnProApi", description="Backend API for PawnPro")
+app = FastAPI(
+    title=settings.api_title,
+    description=settings.api_description,
+    version=settings.api_version
+)
 
-# Add CORS middleware
+# Add CORS middleware with configurable origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
 
-# Mount static files for uploads
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# Mount static files for uploads with configurable directory
+app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
 
 # Pydantic models
 from pydantic import BaseModel
@@ -1117,17 +1122,38 @@ def delete_item(item_id: int, db: Session = Depends(get_db), current_user: User 
     return {"message": "Item deleted"}
 
 # File upload endpoints
-UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR = Path(settings.upload_dir)
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+def validate_file_upload(file: UploadFile) -> None:
+    """Validate uploaded file size and extension"""
+    # Check file size
+    if file.size and file.size > settings.max_file_size:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size: {settings.max_file_size / 1024 / 1024:.1f}MB"
+        )
+    
+    # Check file extension
+    if file.filename:
+        file_ext = file.filename.split(".")[-1].lower()
+        if file_ext not in settings.allowed_extensions_list:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File extension not allowed. Allowed: {', '.join(settings.allowed_extensions_list)}"
+            )
 
 @app.post("/upload/company-logo/{company_id}")
 async def upload_company_logo(company_id: int, file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
+    # Validate file
+    validate_file_upload(file)
+    
     # Validate company
     company = db.query(CompanyModel).filter(CompanyModel.id == company_id).first()
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
     
-    # Validate file type
+    # Additional validation for images
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
     
@@ -1145,12 +1171,15 @@ async def upload_company_logo(company_id: int, file: UploadFile = File(...), db:
 
 @app.post("/upload/customer-photo/{customer_id}")
 async def upload_customer_photo(customer_id: int, file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
+    # Validate file
+    validate_file_upload(file)
+    
     # Validate customer
     customer = db.query(CustomerModel).filter(CustomerModel.id == customer_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     
-    # Validate file type
+    # Additional validation for images
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
     
@@ -1168,16 +1197,15 @@ async def upload_customer_photo(customer_id: int, file: UploadFile = File(...), 
 
 @app.post("/upload/customer-id-proof/{customer_id}")
 async def upload_customer_id_proof(customer_id: int, file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
+    # Validate file
+    validate_file_upload(file)
+    
     # Validate customer
     customer = db.query(CustomerModel).filter(CustomerModel.id == customer_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     
-    # Validate file type
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
-    
-    # Save file
+    # Save file (ID proof can be image or PDF)
     file_path = UPLOAD_DIR / f"customer_{customer_id}_id_proof_{file.filename}"
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
