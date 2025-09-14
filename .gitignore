@@ -133,18 +133,6 @@ dmypy.json
 *.sqlite
 *.sqlite3
 
-# Node.js (for frontend)
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.npm
-.eslintcache
-
-# Frontend build files
-frontend/dist/
-frontend/build/
-
 # IDE files
 .vscode/
 .idea/
