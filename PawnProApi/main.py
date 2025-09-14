@@ -368,6 +368,20 @@ class PledgeItemBase(BaseModel):
 class PledgeItemCreate(PledgeItemBase):
     pass
 
+class PledgeItemForUpdate(BaseModel):
+    """Model for pledge items when updating a pledge (doesn't require pledge_id)"""
+    jewell_design_id: int
+    jewell_condition: str
+    gross_weight: float
+    net_weight: float
+    image: Optional[str] = None
+    net_value: float
+    remarks: Optional[str] = None
+
+class PledgeUpdateWithItems(PledgeBase):
+    """Model for updating pledge with its items"""
+    pledge_items: List[PledgeItemForUpdate] = []
+
 class PledgeItem(PledgeItemBase):
     pledge_item_id: int
     created_at: datetime
@@ -1584,6 +1598,60 @@ def update_pledge(pledge_id: int, pledge: PledgeCreate, db: Session = Depends(ge
     db.commit()
     db.refresh(db_pledge)
     return db_pledge
+
+@app.put("/pledges/{pledge_id}/with-items", response_model=Pledge)
+def update_pledge_with_items(pledge_id: int, pledge_update: PledgeUpdateWithItems, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
+    """Update pledge and replace all its items with new ones"""
+    # Validate pledge exists and belongs to user's company
+    db_pledge = db.query(PledgeModel).filter(
+        PledgeModel.pledge_id == pledge_id,
+        PledgeModel.company_id == current_user.company_id
+    ).first()
+    if db_pledge is None:
+        raise HTTPException(status_code=404, detail="Pledge not found")
+
+    # Validate customer exists
+    customer = db.query(CustomerModel).filter(CustomerModel.id == pledge_update.customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=400, detail="Customer not found")
+
+    # Validate scheme exists
+    scheme = db.query(SchemeModel).filter(SchemeModel.id == pledge_update.scheme_id).first()
+    if not scheme:
+        raise HTTPException(status_code=400, detail="Scheme not found")
+
+    # Start transaction
+    try:
+        # Update pledge details (excluding pledge_items)
+        pledge_data = pledge_update.dict(exclude={'pledge_items'})
+        for key, value in pledge_data.items():
+            setattr(db_pledge, key, value)
+
+        # Remove existing pledge items
+        db.query(PledgeItemModel).filter(PledgeItemModel.pledge_id == pledge_id).delete()
+
+        # Add new pledge items
+        for item_data in pledge_update.pledge_items:
+            # Validate jewell design exists
+            jewell_design = db.query(JewellDesignModel).filter(JewellDesignModel.id == item_data.jewell_design_id).first()
+            if not jewell_design:
+                raise HTTPException(status_code=400, detail=f"Jewell design {item_data.jewell_design_id} not found")
+
+            # Create new pledge item
+            db_item = PledgeItemModel(
+                pledge_id=pledge_id,
+                **item_data.dict()
+            )
+            db.add(db_item)
+
+        # Commit all changes
+        db.commit()
+        db.refresh(db_pledge)
+        return db_pledge
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating pledge: {str(e)}")
 
 @app.delete("/pledges/{pledge_id}")
 def delete_pledge(pledge_id: int, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
