@@ -3,7 +3,7 @@ from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import Generator, List
 from datetime import timedelta, date, datetime
 import os
@@ -34,7 +34,7 @@ app.add_middleware(
 app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
 
 # Pydantic models
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 class LedgerTransactionBase(BaseModel):
@@ -374,6 +374,112 @@ class PledgeItem(PledgeItemBase):
 
     class Config:
         from_attributes = True
+
+# Comprehensive Pydantic models for detailed pledge view
+class CustomerDetail(BaseModel):
+    id: int
+    name: str
+    mobile: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    aadhar_no: Optional[str] = None
+    photo: Optional[str] = None
+    id_proof: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class SchemeDetail(BaseModel):
+    id: int
+    scheme_name: str
+    prefix: Optional[str] = None
+    jewell_category: str
+    interest_rate_monthly: float
+    duration: int
+    loan_allowed_percent: float
+    slippage_percent: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+class JewellDesignDetail(BaseModel):
+    id: int
+    design_name: str
+    design_category: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class PledgeItemDetail(BaseModel):
+    pledge_item_id: int
+    jewell_design_id: int
+    jewell_design: JewellDesignDetail
+    jewell_condition: str
+    gross_weight: float
+    net_weight: float
+    image: Optional[str] = None
+    net_value: float
+    remarks: Optional[str] = None
+    created_at: datetime
+    
+    # Helper property for image URL
+    @property
+    def image_url(self) -> Optional[str]:
+        if self.image:
+            return f"/uploads/{self.image}"
+        return None
+
+    class Config:
+        from_attributes = True
+
+class UserDetail(BaseModel):
+    id: int
+    username: str
+    full_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class PledgeDetailView(BaseModel):
+    # Basic pledge information
+    pledge_id: int
+    pledge_no: str
+    pledge_date: date
+    due_date: date
+    item_count: int
+    gross_weight: float
+    net_weight: float
+    document_charges: float
+    first_month_interest: float
+    total_loan_amount: float
+    final_amount: float
+    status: str
+    is_move_to_bank: bool
+    remarks: Optional[str] = None
+    created_at: datetime
+    
+    # Related entities with full details - using aliases
+    customer: CustomerDetail
+    scheme: SchemeDetail
+    created_by_user: UserDetail = Field(alias='user')
+    pledge_items: List[PledgeItemDetail]
+    
+    # Computed properties
+    @property
+    def total_items(self) -> int:
+        return len(self.pledge_items)
+    
+    @property
+    def has_images(self) -> bool:
+        return any(item.image for item in self.pledge_items)
+    
+    @property
+    def items_with_images(self) -> List[PledgeItemDetail]:
+        return [item for item in self.pledge_items if item.image]
+
+    class Config:
+        from_attributes = True
+        populate_by_name = True
 
 # Company endpoints
 
@@ -1466,6 +1572,30 @@ def delete_pledge(pledge_id: int, db: Session = Depends(get_db), current_user: U
     db.delete(db_pledge)
     db.commit()
     return {"message": "Pledge deleted successfully"}
+
+
+@app.get("/pledges/{pledge_id}/detail", response_model=PledgeDetailView)
+def get_pledge_detail_view(pledge_id: int, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
+    """
+    Get comprehensive pledge details including customer, scheme, pledge items, and photos
+    """
+    # Query pledge with all related data using eager loading
+    pledge = db.query(PledgeModel).options(
+        joinedload(PledgeModel.customer),
+        joinedload(PledgeModel.scheme),
+        joinedload(PledgeModel.user),
+        joinedload(PledgeModel.pledge_items).joinedload(PledgeItemModel.jewell_design)
+    ).filter(
+        PledgeModel.pledge_id == pledge_id,
+        PledgeModel.company_id == current_user.company_id
+    ).first()
+    
+    if not pledge:
+        raise HTTPException(status_code=404, detail="Pledge not found")
+    
+    # Convert the pledge to the detailed view using from_orm
+    # This automatically handles the conversion from SQLAlchemy models to Pydantic models
+    return PledgeDetailView.model_validate(pledge)
 
 
 # Pledge Item endpoints
