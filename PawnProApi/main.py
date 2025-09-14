@@ -379,12 +379,33 @@ class PledgeItem(PledgeItemBase):
 class CustomerDetail(BaseModel):
     id: int
     name: str
-    mobile: Optional[str] = None
-    email: Optional[str] = None
     address: Optional[str] = None
-    aadhar_no: Optional[str] = None
-    photo: Optional[str] = None
-    id_proof: Optional[str] = None
+    city: Optional[str] = None
+    area_id: Optional[int] = None
+    phone: Optional[str] = None  # Your actual field is 'phone', not 'mobile'
+    acc_code: Optional[str] = None
+    id_proof_type: Optional[str] = None
+    id_image: Optional[str] = None  # Your actual field is 'id_image', not 'id_proof'
+    status: Optional[str] = None
+    created_at: datetime
+
+    # Helper properties for backward compatibility and easy access
+    @property
+    def mobile(self) -> Optional[str]:
+        """Alias for phone field for backward compatibility"""
+        return self.phone
+    
+    @property
+    def id_proof(self) -> Optional[str]:
+        """Alias for id_image field for backward compatibility"""
+        return self.id_image
+    
+    @property
+    def id_proof_url(self) -> Optional[str]:
+        """Generate URL for ID proof image"""
+        if self.id_image:
+            return f"/uploads/{self.id_image}"
+        return None
 
     class Config:
         from_attributes = True
@@ -405,7 +426,9 @@ class SchemeDetail(BaseModel):
 class JewellDesignDetail(BaseModel):
     id: int
     design_name: str
-    design_category: Optional[str] = None
+    design_category: Optional[str] = None  # This field exists in your response
+    status: Optional[str] = None
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -435,7 +458,9 @@ class PledgeItemDetail(BaseModel):
 class UserDetail(BaseModel):
     id: int
     username: str
-    full_name: Optional[str] = None
+    full_name: Optional[str] = None  # This field appears in your response
+    email: Optional[str] = None
+    role: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -458,10 +483,10 @@ class PledgeDetailView(BaseModel):
     remarks: Optional[str] = None
     created_at: datetime
     
-    # Related entities with full details - using aliases
+    # Related entities with full details
     customer: CustomerDetail
     scheme: SchemeDetail
-    created_by_user: UserDetail = Field(alias='user')
+    user: UserDetail  # Use 'user' to match SQLAlchemy relationship name
     pledge_items: List[PledgeItemDetail]
     
     # Computed properties
