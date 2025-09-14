@@ -10,7 +10,7 @@ import os
 import shutil
 from pathlib import Path
 
-from database import SessionLocal
+from database import SessionLocal, get_db
 from auth import authenticate_user, create_access_token, Token, get_current_user, get_current_admin_user, get_password_hash
 from models import Company as CompanyModel, User as UserModel, MasterAccount as MasterAccountModel, VoucherMaster as VoucherMasterModel, LedgerEntry as LedgerEntryModel, Area as AreaModel, GoldSilverRate as GoldSilverRateModel, JewellDesign as JewellDesignModel, JewellCondition as JewellConditionModel, Scheme as SchemeModel, Customer as CustomerModel, Item as ItemModel, Pledge as PledgeModel, PledgeItem as PledgeItemModel, JewellType as JewellTypeModel, JewellRate as JewellRateModel
 
@@ -396,14 +396,6 @@ def read_root(current_user = Depends(get_current_user)):
 @app.get("/users/me", response_model=User)
 def read_users_me(current_user: UserModel = Depends(get_current_user)):
     return current_user
-
-# Dependency to get DB session
-def get_db() -> Generator[Session, None, None]:
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 # User CRUD endpoints
 @app.post("/users", response_model=User)

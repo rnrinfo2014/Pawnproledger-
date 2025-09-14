@@ -7,9 +7,24 @@ from config import settings
 
 load_dotenv()
 
+# Get database URL from settings
 DATABASE_URL = settings.database_url
 
-engine = create_engine(DATABASE_URL)
+# For Render PostgreSQL, ensure SSL is properly configured
+engine_kwargs = {}
+if "render" in DATABASE_URL.lower() or settings.environment == "production":
+    # Render PostgreSQL requires SSL
+    engine_kwargs["connect_args"] = {"sslmode": "require"}
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+# Dependency to get database session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
