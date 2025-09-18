@@ -1,0 +1,43 @@
+[tool.pyright]
+include = ["PawnProApi"]
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    ".venv"
+]
+
+# Disable specific warnings that are false positives with SQLAlchemy 1.4
+reportGeneralTypeIssues = false
+reportOptionalMemberAccess = false
+reportOptionalCall = false
+reportOptionalOperand = false
+reportOptionalIterable = false
+reportOptionalContextManager = false
+reportOptionalSubscript = false
+reportPrivateImportUsage = false
+
+# SQLAlchemy specific issues
+typeCheckingMode = "basic"
+
+[tool.pylsp-mypy]
+enabled = false
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+disallow_untyped_defs = false
+check_untyped_defs = false
+warn_return_any = false
+warn_unused_ignores = false
+show_error_codes = true
+
+# SQLAlchemy plugin
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+
+[[tool.mypy.overrides]]
+module = "sqlalchemy.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "main"
+ignore_errors = true

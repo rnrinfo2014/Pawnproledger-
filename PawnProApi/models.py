@@ -55,6 +55,7 @@ class Company(Base):
     customers = relationship("Customer", back_populates="company")
     items = relationship("Item", back_populates="company")
     pledges = relationship("Pledge", back_populates="company")
+    pledge_payments = relationship("PledgePayment", back_populates="company")
 
 class User(Base):
     __tablename__ = "users"
@@ -73,6 +74,7 @@ class User(Base):
     gold_silver_rates = relationship("GoldSilverRate", back_populates="user")
     customers = relationship("Customer", back_populates="user")
     pledges = relationship("Pledge", back_populates="user")
+    pledge_payments = relationship("PledgePayment", back_populates="user")
 
 class MasterAccount(Base):
     __tablename__ = "accounts_master"
@@ -272,6 +274,7 @@ class Pledge(Base):
     user = relationship("User", back_populates="pledges")
     company = relationship("Company", back_populates="pledges")
     pledge_items = relationship("PledgeItem", back_populates="pledge", cascade="all, delete-orphan")
+    pledge_payments = relationship("PledgePayment", back_populates="pledge", cascade="all, delete-orphan")
 
 
 class PledgeItem(Base):
@@ -291,3 +294,46 @@ class PledgeItem(Base):
     # Relationships
     pledge = relationship("Pledge", back_populates="pledge_items")
     jewell_design = relationship("JewellDesign", back_populates="pledge_items")
+
+
+class Bank(Base):
+    __tablename__ = "banks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bank_name = Column(String(200), nullable=False)
+    branch_name = Column(String(200))
+    account_name = Column(String(200))  # Renamed from account_holder_name and simplified
+    status = Column(String(20), default='active')  # active, inactive
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company")
+
+
+class PledgePayment(Base):
+    __tablename__ = "pledge_payments"
+
+    payment_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    pledge_id = Column(Integer, ForeignKey("pledges.pledge_id", ondelete="CASCADE"), nullable=False)
+    payment_date = Column(Date, nullable=False, default=func.current_date())
+    payment_type = Column(String(20), nullable=False)  # interest, principal, partial_redeem, full_redeem
+    amount = Column(Float, nullable=False)
+    interest_amount = Column(Float, default=0.0)
+    principal_amount = Column(Float, default=0.0)
+    penalty_amount = Column(Float, default=0.0)
+    discount_amount = Column(Float, default=0.0)  # Discount applied to payment
+    balance_amount = Column(Float, nullable=False)  # Remaining balance after this payment
+    payment_method = Column(String(20), default='cash')  # cash, bank_transfer, cheque, etc.
+    bank_reference = Column(String(100))  # For non-cash payments
+    receipt_no = Column(String(50))
+    remarks = Column(String)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Relationships
+    pledge = relationship("Pledge", back_populates="pledge_payments")
+    user = relationship("User")
+    company = relationship("Company")

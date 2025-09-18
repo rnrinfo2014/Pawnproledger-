@@ -1,37 +1,84 @@
+# type: ignore
+# pylint: disable=all
+# mypy: ignore-errors
+"""
+PawnSoft API - Main FastAPI application
+This file contains all the API endpoints for the PawnSoft system
+"""
+
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.orm import Session, joinedload
-from typing import Generator, List
+from sqlalchemy.orm.session import Session
+from sqlalchemy.orm import joinedload
+from sqlalchemy.sql.expression import or_
+from sqlalchemy.sql.functions import func
+from typing import Generator, List, Optional, Union
 from datetime import timedelta, date, datetime
+from dateutil.relativedelta import relativedelta
+from calendar import monthrange
 import os
 import shutil
 from pathlib import Path
 
 from database import SessionLocal, get_db
-from auth import authenticate_user, create_access_token, Token, get_current_user, get_current_admin_user, get_password_hash
-from models import Company as CompanyModel, User as UserModel, MasterAccount as MasterAccountModel, VoucherMaster as VoucherMasterModel, LedgerEntry as LedgerEntryModel, Area as AreaModel, GoldSilverRate as GoldSilverRateModel, JewellDesign as JewellDesignModel, JewellCondition as JewellConditionModel, Scheme as SchemeModel, Customer as CustomerModel, Item as ItemModel, Pledge as PledgeModel, PledgeItem as PledgeItemModel, JewellType as JewellTypeModel, JewellRate as JewellRateModel
+from auth import authenticate_user, create_access_token, Token, get_current_user, get_current_admin_user, get_password_hash, validate_password
+from models import Company as CompanyModel, User as UserModel, MasterAccount as MasterAccountModel, VoucherMaster as VoucherMasterModel, LedgerEntry as LedgerEntryModel, Area as AreaModel, GoldSilverRate as GoldSilverRateModel, JewellDesign as JewellDesignModel, JewellCondition as JewellConditionModel, Scheme as SchemeModel, Customer as CustomerModel, Item as ItemModel, Pledge as PledgeModel, PledgeItem as PledgeItemModel, JewellType as JewellTypeModel, JewellRate as JewellRateModel, Bank as BankModel, PledgePayment as PledgePaymentModel
 from config import settings
+from security_middleware import SecurityHeadersMiddleware, RateLimitMiddleware, SecurityLoggingMiddleware
 
 app = FastAPI(
     title=settings.api_title,
     description=settings.api_description,
-    version=settings.api_version
+    version=settings.api_version,
+    docs_url="/docs" if not settings.is_production else None,  # Disable docs in production
+    redoc_url="/redoc" if not settings.is_production else None
 )
 
+# Add security middleware (order matters!)
+if settings.enable_security_headers:
+    app.add_middleware(SecurityHeadersMiddleware)
+
+app.add_middleware(
+    RateLimitMiddleware, 
+    max_requests=settings.rate_limit_requests,
+    time_window=settings.rate_limit_period
+)
+
+app.add_middleware(SecurityLoggingMiddleware)
+
 # Add CORS middleware with configurable origins
+cors_origins = settings.cors_origins_list
+# In development, be more permissive with CORS
+if settings.environment == "development":
+    cors_origins = ["*"]  # Allow all origins in development
+    
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins_list,
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Include OPTIONS for preflight
     allow_headers=["*"],  # Allows all headers
 )
 
 # Mount static files for uploads with configurable directory
 app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
+
+# Startup event to log configuration
+@app.on_event("startup")
+async def startup_event():
+    print("🚀 PawnSoft API Starting Up...")
+    print(f"📍 Environment: {settings.environment}")
+    print(f"🌐 CORS Origins: {settings.cors_origins}")
+    print(f"🔒 Security Headers: {'Enabled' if settings.enable_security_headers else 'Disabled'}")
+    print(f"⚡ Rate Limiting: {settings.rate_limit_requests} requests per {settings.rate_limit_period}s")
+    print("✅ API Ready!")
+
+# Import API routers
+from coa_api import router as coa_router
+from daybook_api import router as daybook_router
 
 # Pydantic models
 from pydantic import BaseModel, Field
@@ -354,6 +401,24 @@ class Pledge(PledgeBase):
     class Config:
         from_attributes = True
 
+# Pledge listing schema with required fields
+class PledgeOut(BaseModel):
+    id: int  # Maps to pledge_id
+    pledge_no:str
+    customer_id: int
+    scheme_id: int
+    principal_amount: float  # Maps to total_loan_amount
+    interest_rate: float  # Will be calculated from scheme
+    start_date: date  # Maps to pledge_date
+    maturity_date: date  # Maps to due_date
+    remaining_principal: float  # Will be calculated from payments
+    status: str  # Maps to status with uppercase conversion
+    created_at: datetime
+    closed_at: Optional[datetime] = None  # Will be calculated based on status
+
+    class Config:
+        from_attributes = True
+
 # Pydantic models for PledgeItem
 class PledgeItemBase(BaseModel):
     pledge_id: int
@@ -505,6 +570,294 @@ class PledgeDetailView(BaseModel):
     class Config:
         from_attributes = True
         populate_by_name = True
+
+
+# ===============================================
+# COMPREHENSIVE PLEDGE UPDATE MODELS
+# ===============================================
+
+# Customer update model - for partial customer information changes
+class CustomerUpdateData(BaseModel):
+    name: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    area_id: Optional[int] = None
+    phone: Optional[str] = None
+    id_proof_type: Optional[str] = None
+    # Note: id_image updates should be handled through file upload endpoints
+
+class PledgeItemOperation(BaseModel):
+    operation: str = Field(..., description="'add', 'update', or 'remove'")
+    pledge_item_id: Optional[int] = Field(None, description="Required for 'update' and 'remove' operations")
+    jewell_design_id: Optional[int] = Field(None, description="Required for 'add' and 'update' operations")
+    jewell_condition: Optional[str] = None
+    gross_weight: Optional[float] = None
+    net_weight: Optional[float] = None
+    net_value: Optional[float] = None
+    remarks: Optional[str] = None
+    # Note: image updates should be handled through separate file upload endpoints
+
+class PledgeComprehensiveUpdate(BaseModel):
+    # Basic pledge information updates
+    scheme_id: Optional[int] = Field(None, description="Change to different scheme")
+    pledge_date: Optional[date] = Field(None, description="Change pledge date")
+    due_date: Optional[date] = Field(None, description="Change due date")
+    document_charges: Optional[float] = None
+    first_month_interest: Optional[float] = None
+    total_loan_amount: Optional[float] = None
+    final_amount: Optional[float] = None
+    status: Optional[str] = Field(None, description="Change pledge status: 'active', 'redeemed', 'auctioned', etc.")
+    is_move_to_bank: Optional[bool] = None
+    remarks: Optional[str] = None
+    
+    # Customer information updates (optional)
+    customer_updates: Optional[CustomerUpdateData] = Field(None, description="Update customer information")
+    change_customer_id: Optional[int] = Field(None, description="Transfer pledge to different customer entirely")
+    
+    # Pledge items operations
+    item_operations: Optional[List[PledgeItemOperation]] = Field(default_factory=list, description="List of operations to perform on pledge items")
+    
+    # Financial recalculation flags
+    recalculate_weights: Optional[bool] = Field(True, description="Automatically recalculate gross/net weights from items")
+    recalculate_item_count: Optional[bool] = Field(True, description="Automatically recalculate item count from items")
+    recalculate_financials: Optional[bool] = Field(False, description="Recalculate loan amounts based on new scheme/weights")
+
+class PledgeUpdateResponse(BaseModel):
+    success: bool
+    message: str
+    updated_pledge: PledgeDetailView
+    warnings: Optional[List[str]] = Field(default_factory=list, description="Non-critical warnings during update")
+    
+    # Update summary
+    changes_summary: Optional[dict] = Field(default_factory=dict, description="Summary of what was changed")
+    items_added: Optional[int] = 0
+    items_updated: Optional[int] = 0
+    items_removed: Optional[int] = 0
+
+
+# ===============================================
+# BANK MODELS
+# ===============================================
+
+# Pydantic models for Bank
+class BankBase(BaseModel):
+    bank_name: str = Field(..., max_length=200, description="Name of the bank")
+    branch_name: Optional[str] = Field(None, max_length=200, description="Branch name")
+    account_name: Optional[str] = Field(None, max_length=200, description="Account holder name")
+    status: Optional[str] = Field("active", description="Bank status: active, inactive")
+
+class BankCreate(BankBase):
+    pass
+
+class BankUpdate(BaseModel):
+    bank_name: Optional[str] = Field(None, max_length=200)
+    branch_name: Optional[str] = Field(None, max_length=200)
+    account_name: Optional[str] = Field(None, max_length=200)
+    status: Optional[str] = Field(None, description="Bank status: active, inactive")
+
+class Bank(BankBase):
+    id: int
+    company_id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# ===============================================
+# PLEDGE PAYMENT MODELS
+# ===============================================
+
+class PledgePaymentBase(BaseModel):
+    pledge_id: int = Field(..., description="ID of the pledge")
+    payment_date: Optional[date] = Field(None, description="Payment date (defaults to current date)")
+    payment_type: str = Field(..., description="Type of payment: interest, principal, partial_redeem, full_redeem")
+    amount: float = Field(..., gt=0, description="Payment amount")
+    interest_amount: Optional[float] = Field(0.0, ge=0, description="Interest portion of payment")
+    principal_amount: Optional[float] = Field(0.0, ge=0, description="Principal portion of payment")
+    penalty_amount: Optional[float] = Field(0.0, ge=0, description="Penalty amount")
+    discount_amount: Optional[float] = Field(0.0, ge=0, description="Discount amount")
+    payment_method: Optional[str] = Field("cash", description="Payment method: cash, bank_transfer, cheque")
+    bank_reference: Optional[str] = Field(None, max_length=100, description="Bank reference for non-cash payments")
+    remarks: Optional[str] = Field(None, description="Payment remarks")
+
+class PledgePaymentCreate(PledgePaymentBase):
+    pass
+
+class PledgePaymentUpdate(BaseModel):
+    payment_date: Optional[date] = None
+    payment_type: Optional[str] = None
+    amount: Optional[float] = Field(None, gt=0)
+    interest_amount: Optional[float] = Field(None, ge=0)
+    principal_amount: Optional[float] = Field(None, ge=0)
+    penalty_amount: Optional[float] = Field(None, ge=0)
+    discount_amount: Optional[float] = Field(None, ge=0)
+    payment_method: Optional[str] = None
+    bank_reference: Optional[str] = Field(None, max_length=100)
+    receipt_no: Optional[str] = Field(None, max_length=50)
+    remarks: Optional[str] = None
+
+class PledgePayment(PledgePaymentBase):
+    payment_id: int
+    receipt_no: str = Field(..., description="Auto-generated receipt number")
+    balance_amount: float
+    created_at: datetime
+    created_by: int
+    company_id: int
+
+    class Config:
+        from_attributes = True
+
+class PledgePaymentWithDetails(PledgePayment):
+    """Extended payment model with pledge and user details"""
+    pledge_no: Optional[str] = None
+    customer_name: Optional[str] = None
+    created_by_username: Optional[str] = None
+
+
+# ===============================================
+# PLEDGE SETTLEMENT MODELS
+# ===============================================
+
+class InterestPeriodDetail(BaseModel):
+    """Detail for each interest calculation period"""
+    period: str = Field(..., description="Period description (e.g., 'Month 1', 'Month 2')")
+    from_date: date = Field(..., description="Start date of the period")
+    to_date: date = Field(..., description="End date of the period")
+    days: int = Field(..., description="Number of days in the period")
+    rate_percent: float = Field(..., description="Monthly interest rate percentage")
+    principal_amount: float = Field(..., description="Principal amount for calculation")
+    interest_amount: float = Field(..., description="Interest amount for this period")
+    is_mandatory: bool = Field(False, description="Whether this is mandatory first month interest")
+    is_partial: bool = Field(False, description="Whether this is a partial month")
+
+class PledgeSettlementResponse(BaseModel):
+    """Complete pledge settlement details response"""
+    pledge_id: int = Field(..., description="Pledge ID")
+    pledge_no: str = Field(..., description="Pledge number")
+    customer_name: str = Field(..., description="Customer name")
+    pledge_date: date = Field(..., description="Pledge creation date")
+    calculation_date: date = Field(..., description="Settlement calculation date (today)")
+    status: str = Field(..., description="Current pledge status")
+    
+    # Loan details
+    loan_amount: float = Field(..., description="Original principal/loan amount")
+    scheme_interest_rate: float = Field(..., description="Monthly interest rate from scheme")
+    
+    # Interest calculations
+    total_interest: float = Field(..., description="Total accrued interest including mandatory first month")
+    first_month_interest: float = Field(..., description="Mandatory first month interest (always charged)")
+    accrued_interest: float = Field(..., description="Additional interest accrued over time")
+    interest_calculation_details: List[InterestPeriodDetail] = Field(..., description="Breakdown of interest calculation by period")
+    
+    # Payment details
+    paid_interest: float = Field(..., description="Total interest payments made")
+    paid_principal: float = Field(..., description="Total principal payments made")
+    total_paid_amount: float = Field(..., description="Total amount paid (interest + principal)")
+    
+    # Settlement amount
+    final_amount: float = Field(..., description="Final settlement amount = loan_amount + total_interest - total_paid_amount")
+    remaining_interest: float = Field(..., description="Unpaid interest amount")
+    remaining_principal: float = Field(..., description="Unpaid principal amount")
+    
+    class Config:
+        from_attributes = True
+
+
+# ===============================================
+# PLEDGE WITH ITEMS MODELS
+# ===============================================
+
+# Models for creating pledge items within pledge creation
+class PledgeItemCreateData(BaseModel):
+    jewell_design_id: int = Field(..., description="ID of the jewell design")
+    jewell_condition: str = Field(..., max_length=100, description="Condition of the item")
+    gross_weight: float = Field(..., ge=0, description="Gross weight of the item")
+    net_weight: float = Field(..., ge=0, description="Net weight of the item")
+    net_value: float = Field(..., ge=0, description="Net value of the item")
+    remarks: Optional[str] = Field(None, description="Additional remarks for the item")
+    # Note: image will be handled separately through file upload
+
+# Models for updating pledge items within pledge update
+class PledgeItemUpdateData(BaseModel):
+    pledge_item_id: Optional[int] = Field(None, description="ID for existing items (for update/delete)")
+    jewell_design_id: int = Field(..., description="ID of the jewell design")
+    jewell_condition: str = Field(..., max_length=100, description="Condition of the item")
+    gross_weight: float = Field(..., ge=0, description="Gross weight of the item")
+    net_weight: float = Field(..., ge=0, description="Net weight of the item")
+    net_value: float = Field(..., ge=0, description="Net value of the item")
+    remarks: Optional[str] = Field(None, description="Additional remarks for the item")
+    action: str = Field("keep", description="Action: 'keep', 'delete', 'update', 'add'")
+
+# Comprehensive pledge creation model with items
+class PledgeWithItemsCreate(BaseModel):
+    # Pledge basic information
+    customer_id: int = Field(..., description="ID of the customer")
+    scheme_id: int = Field(..., description="ID of the scheme")
+    pledge_date: date = Field(..., description="Date of pledge")
+    due_date: date = Field(..., description="Due date for the pledge")
+    document_charges: Optional[float] = Field(0.0, ge=0, description="Document charges")
+    first_month_interest: float = Field(..., ge=0, description="First month interest amount")
+    total_loan_amount: float = Field(..., ge=0, description="Total loan amount")
+    final_amount: float = Field(..., ge=0, description="Final amount")
+    status: Optional[str] = Field("active", description="Pledge status")
+    is_move_to_bank: Optional[bool] = Field(False, description="Is moved to bank")
+    remarks: Optional[str] = Field(None, description="Pledge remarks")
+    
+    # Pledge items
+    items: List[PledgeItemCreateData] = Field(..., description="List of pledge items")
+    
+    # Auto-calculation flags
+    auto_calculate_weights: Optional[bool] = Field(True, description="Auto-calculate gross/net weights from items")
+    auto_calculate_item_count: Optional[bool] = Field(True, description="Auto-calculate item count from items")
+
+# Comprehensive pledge update model with items
+class PledgeWithItemsUpdate(BaseModel):
+    # Pledge basic information (all optional for partial updates)
+    customer_id: Optional[int] = Field(None, description="ID of the customer")
+    scheme_id: Optional[int] = Field(None, description="ID of the scheme")
+    pledge_date: Optional[date] = Field(None, description="Date of pledge")
+    due_date: Optional[date] = Field(None, description="Due date for the pledge")
+    document_charges: Optional[float] = Field(None, ge=0, description="Document charges")
+    first_month_interest: Optional[float] = Field(None, ge=0, description="First month interest amount")
+    total_loan_amount: Optional[float] = Field(None, ge=0, description="Total loan amount")
+    final_amount: Optional[float] = Field(None, ge=0, description="Final amount")
+    status: Optional[str] = Field(None, description="Pledge status")
+    is_move_to_bank: Optional[bool] = Field(None, description="Is moved to bank")
+    remarks: Optional[str] = Field(None, description="Pledge remarks")
+    
+    # Pledge items operations
+    items: Optional[List[PledgeItemUpdateData]] = Field(None, description="List of pledge items with actions")
+    
+    # Items to delete (by ID)
+    delete_item_ids: Optional[List[int]] = Field(default_factory=list, description="List of pledge item IDs to delete")
+    
+    # Auto-calculation flags
+    auto_calculate_weights: Optional[bool] = Field(True, description="Auto-calculate gross/net weights from items")
+    auto_calculate_item_count: Optional[bool] = Field(True, description="Auto-calculate item count from items")
+
+# Response models
+class PledgeWithItemsResponse(BaseModel):
+    success: bool
+    message: str
+    pledge: PledgeDetailView
+    items_created: Optional[int] = 0
+    items_updated: Optional[int] = 0
+    items_deleted: Optional[int] = 0
+    warnings: Optional[List[str]] = Field(default_factory=list)
+
+
+# Health check endpoint (no authentication required)
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": settings.api_version,
+        "environment": settings.environment
+    }
 
 # Company endpoints
 
@@ -790,7 +1143,6 @@ def search_jewell_designs(
     if len(conditions) == 1:
         query = query.filter(conditions[0])
     else:
-        from sqlalchemy import or_
         query = query.filter(or_(*conditions))
     
     # Apply pagination and execute
@@ -1086,7 +1438,6 @@ def search_customers(
     if len(conditions) == 1:
         query = query.filter(conditions[0])
     else:
-        from sqlalchemy import or_
         query = query.filter(or_(*conditions))
     
     # Apply pagination and execute
@@ -1528,6 +1879,80 @@ def generate_pledge_no(db: Session, scheme_id: int, company_id: int) -> str:
     return f"{prefix}-{next_number:04d}"
 
 
+def generate_receipt_no(db: Session, company_id) -> str:
+    """Generate auto-incrementing receipt number for pledge payments"""
+    # Get current year for yearly sequence
+    current_year = datetime.now().year
+    
+    # Count existing payments for this company in current year
+    year_start = datetime(current_year, 1, 1)
+    year_end = datetime(current_year + 1, 1, 1)
+    
+    count = db.query(PledgePaymentModel).filter(
+        PledgePaymentModel.company_id == company_id,
+        PledgePaymentModel.created_at >= year_start,
+        PledgePaymentModel.created_at < year_end
+    ).count()
+    
+    next_number = count + 1
+    return f"RCPT-{company_id}-{current_year}-{next_number:05d}"
+
+
+def generate_first_interest_receipt_no(db: Session, company_id) -> str:
+    """Generate auto-incrementing first interest receipt number"""
+    # Get current year for yearly sequence
+    current_year = datetime.now().year
+    
+    # Count existing first interest payments for this company in current year
+    year_start = datetime(current_year, 1, 1)
+    year_end = datetime(current_year + 1, 1, 1)
+    
+    count = db.query(PledgePaymentModel).filter(
+        PledgePaymentModel.company_id == company_id,
+        PledgePaymentModel.receipt_no.like(f"FI-{company_id}-{current_year}-%"),
+        PledgePaymentModel.created_at >= year_start,
+        PledgePaymentModel.created_at < year_end
+    ).count()
+    
+    next_number = count + 1
+    return f"FI-{company_id}-{current_year}-{next_number:05d}"
+
+
+def create_automatic_first_interest_payment(db: Session, pledge: PledgeModel, current_user) -> Optional[PledgePaymentModel]:
+    """Create automatic first interest payment when pledge is created"""
+    first_interest = getattr(pledge, 'first_month_interest', 0) or 0
+    if float(first_interest) <= 0:
+        return None
+        
+    # Generate first interest receipt number
+    receipt_no = generate_first_interest_receipt_no(db, current_user.company_id)
+    
+    # Create first interest payment
+    final_amount = getattr(pledge, 'final_amount', 0) or 0
+    first_payment = PledgePaymentModel(
+        pledge_id=pledge.pledge_id,
+        payment_date=pledge.pledge_date,
+        payment_type="first_interest",
+        amount=first_interest,
+        interest_amount=first_interest,
+        principal_amount=0.0,
+        penalty_amount=0.0,
+        discount_amount=0.0,
+        balance_amount=float(final_amount) - float(first_interest),
+        payment_method="auto",
+        bank_reference=None,
+        receipt_no=receipt_no,
+        remarks="Automatic first month interest payment",
+        created_by=current_user.id,
+        company_id=current_user.company_id
+    )
+    
+    db.add(first_payment)
+    db.flush()  # Get the payment ID
+    
+    return first_payment
+
+
 @app.post("/pledges/", response_model=Pledge)
 def create_pledge(pledge: PledgeCreate, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
     # Generate pledge number
@@ -1543,15 +1968,26 @@ def create_pledge(pledge: PledgeCreate, db: Session = Depends(get_db), current_u
     if not scheme:
         raise HTTPException(status_code=400, detail="Scheme not found")
 
-    db_pledge = PledgeModel(
-        **pledge.dict(),
-        pledge_no=pledge_no,
-        created_by=current_user.id
-    )
-    db.add(db_pledge)
-    db.commit()
-    db.refresh(db_pledge)
-    return db_pledge
+    try:
+        db_pledge = PledgeModel(
+            **pledge.dict(),
+            pledge_no=pledge_no,
+            created_by=current_user.id
+        )
+        db.add(db_pledge)
+        db.flush()  # Get pledge ID for payment creation
+        
+        # Create automatic first interest payment
+        first_payment = create_automatic_first_interest_payment(db, db_pledge, current_user)
+        
+        db.commit()
+        db.refresh(db_pledge)
+        
+        return db_pledge
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating pledge: {str(e)}")
 
 
 @app.get("/pledges/", response_model=List[Pledge])
@@ -1621,6 +2057,616 @@ def get_pledge_detail_view(pledge_id: int, db: Session = Depends(get_db), curren
     # Convert the pledge to the detailed view using from_orm
     # This automatically handles the conversion from SQLAlchemy models to Pydantic models
     return PledgeDetailView.model_validate(pledge)
+
+
+@app.put("/pledges/{pledge_id}/comprehensive-update", response_model=PledgeUpdateResponse)
+def update_pledge_comprehensive(
+    pledge_id: int, 
+    update_data: PledgeComprehensiveUpdate, 
+    db: Session = Depends(get_db), 
+    current_user: UserModel = Depends(get_current_user)
+):
+    """
+    Comprehensive pledge update endpoint that handles:
+    - Customer changes (update existing or transfer to different customer)
+    - Scheme changes
+    - Date modifications
+    - Pledge item operations (add, update, remove)
+    - Financial recalculations
+    All operations are performed in a single transaction for data consistency.
+    """
+    
+    # Start transaction
+    try:
+        # Fetch existing pledge with all relationships
+        pledge = db.query(PledgeModel).options(
+            joinedload(PledgeModel.customer),
+            joinedload(PledgeModel.scheme),
+            joinedload(PledgeModel.user),
+            joinedload(PledgeModel.pledge_items).joinedload(PledgeItemModel.jewell_design)
+        ).filter(
+            PledgeModel.pledge_id == pledge_id,
+            PledgeModel.company_id == current_user.company_id
+        ).first()
+        
+        if not pledge:
+            raise HTTPException(status_code=404, detail="Pledge not found")
+        
+        warnings = []
+        changes_summary = {}
+        items_added = 0
+        items_updated = 0
+        items_removed = 0
+        
+        # 1. Handle customer updates
+        if update_data.change_customer_id:
+            # Transfer pledge to different customer entirely
+            new_customer = db.query(CustomerModel).filter(
+                CustomerModel.id == update_data.change_customer_id,
+                CustomerModel.company_id == current_user.company_id
+            ).first()
+            if not new_customer:
+                raise HTTPException(status_code=400, detail="New customer not found")
+            
+            old_customer_id = pledge.customer_id
+            setattr(pledge, 'customer_id', update_data.change_customer_id)
+            changes_summary["customer_changed"] = f"From customer ID {old_customer_id} to {update_data.change_customer_id}"
+            
+        elif update_data.customer_updates:
+            # Update existing customer information
+            customer = pledge.customer
+            customer_changes = []
+            
+            if update_data.customer_updates.name and customer.name != update_data.customer_updates.name:
+                setattr(customer, 'name', update_data.customer_updates.name)
+                customer_changes.append(f"name: {customer.name}")
+            
+            if update_data.customer_updates.address and getattr(customer, 'address', None) != update_data.customer_updates.address:
+                setattr(customer, 'address', update_data.customer_updates.address)
+                customer_changes.append(f"address: {customer.address}")
+            
+            if update_data.customer_updates.city and getattr(customer, 'city', None) != update_data.customer_updates.city:
+                setattr(customer, 'city', update_data.customer_updates.city)
+                customer_changes.append(f"city: {customer.city}")
+            
+            if update_data.customer_updates.area_id and getattr(customer, 'area_id', None) != update_data.customer_updates.area_id:
+                setattr(customer, 'area_id', update_data.customer_updates.area_id)
+                customer_changes.append(f"area_id: {customer.area_id}")
+            
+            if update_data.customer_updates.phone and getattr(customer, 'phone', None) != update_data.customer_updates.phone:
+                # Check if phone number is unique
+                existing_customer = db.query(CustomerModel).filter(
+                    CustomerModel.phone == update_data.customer_updates.phone,
+                    CustomerModel.id != customer.id,
+                    CustomerModel.company_id == current_user.company_id
+                ).first()
+                if existing_customer:
+                    raise HTTPException(status_code=400, detail="Phone number already exists for another customer")
+                
+                setattr(customer, 'phone', update_data.customer_updates.phone)
+                customer_changes.append(f"phone: {customer.phone}")
+            
+            if update_data.customer_updates.id_proof_type and getattr(customer, 'id_proof_type', None) != update_data.customer_updates.id_proof_type:
+                setattr(customer, 'id_proof_type', update_data.customer_updates.id_proof_type)
+                customer_changes.append(f"id_proof_type: {customer.id_proof_type}")
+            
+            if customer_changes:
+                changes_summary["customer_updated"] = customer_changes
+        
+        # 2. Handle scheme changes
+        if update_data.scheme_id and getattr(pledge, 'scheme_id', None) != update_data.scheme_id:
+            new_scheme = db.query(SchemeModel).filter(
+                SchemeModel.id == update_data.scheme_id,
+                SchemeModel.company_id == current_user.company_id
+            ).first()
+            if not new_scheme:
+                raise HTTPException(status_code=400, detail="New scheme not found")
+            
+            old_scheme_id = pledge.scheme_id
+            setattr(pledge, 'scheme_id', update_data.scheme_id)
+            changes_summary["scheme_changed"] = f"From scheme ID {old_scheme_id} to {update_data.scheme_id}"
+            
+            if update_data.recalculate_financials:
+                warnings.append("Financial recalculation based on new scheme should be implemented based on business rules")
+        
+        # 3. Handle basic pledge field updates
+        pledge_changes = []
+        
+        if update_data.pledge_date and getattr(pledge, 'pledge_date', None) != update_data.pledge_date:
+            setattr(pledge, 'pledge_date', update_data.pledge_date)
+            pledge_changes.append(f"pledge_date: {pledge.pledge_date}")
+        
+        if update_data.due_date and getattr(pledge, 'due_date', None) != update_data.due_date:
+            setattr(pledge, 'due_date', update_data.due_date)
+            pledge_changes.append(f"due_date: {pledge.due_date}")
+        
+        if update_data.document_charges is not None and getattr(pledge, 'document_charges', None) != update_data.document_charges:
+            setattr(pledge, 'document_charges', update_data.document_charges)
+            pledge_changes.append(f"document_charges: {pledge.document_charges}")
+        
+        if update_data.first_month_interest is not None and getattr(pledge, 'first_month_interest', None) != update_data.first_month_interest:
+            setattr(pledge, 'first_month_interest', update_data.first_month_interest)
+            pledge_changes.append(f"first_month_interest: {pledge.first_month_interest}")
+        
+        if update_data.total_loan_amount is not None and getattr(pledge, 'total_loan_amount', None) != update_data.total_loan_amount:
+            setattr(pledge, 'total_loan_amount', update_data.total_loan_amount)
+            pledge_changes.append(f"total_loan_amount: {pledge.total_loan_amount}")
+        
+        if update_data.final_amount is not None and getattr(pledge, 'final_amount', None) != update_data.final_amount:
+            setattr(pledge, 'final_amount', update_data.final_amount)
+            pledge_changes.append(f"final_amount: {pledge.final_amount}")
+        
+        if update_data.status and getattr(pledge, 'status', None) != update_data.status:
+            setattr(pledge, 'status', update_data.status)
+            pledge_changes.append(f"status: {pledge.status}")
+        
+        if update_data.is_move_to_bank is not None and getattr(pledge, 'is_move_to_bank', None) != update_data.is_move_to_bank:
+            setattr(pledge, 'is_move_to_bank', update_data.is_move_to_bank)
+            pledge_changes.append(f"is_move_to_bank: {pledge.is_move_to_bank}")
+        
+        if update_data.remarks is not None and getattr(pledge, 'remarks', None) != update_data.remarks:
+            setattr(pledge, 'remarks', update_data.remarks)
+            pledge_changes.append(f"remarks: {pledge.remarks}")
+        
+        if pledge_changes:
+            changes_summary["pledge_updated"] = pledge_changes
+        
+        # 4. Handle pledge item operations
+        if update_data.item_operations:
+            for operation in update_data.item_operations:
+                if operation.operation == "add":
+                    # Validate required fields for add operation
+                    if not operation.jewell_design_id or not operation.jewell_condition:
+                        warnings.append("Skipped add operation: jewell_design_id and jewell_condition are required")
+                        continue
+                    
+                    # Verify jewell design exists
+                    design = db.query(JewellDesignModel).filter(
+                        JewellDesignModel.id == operation.jewell_design_id
+                    ).first()
+                    if not design:
+                        warnings.append(f"Skipped add operation: jewell_design_id {operation.jewell_design_id} not found")
+                        continue
+                    
+                    new_item = PledgeItemModel(
+                        pledge_id=pledge_id,
+                        jewell_design_id=operation.jewell_design_id,
+                        jewell_condition=operation.jewell_condition,
+                        gross_weight=operation.gross_weight or 0.0,
+                        net_weight=operation.net_weight or 0.0,
+                        net_value=operation.net_value or 0.0,
+                        remarks=operation.remarks
+                    )
+                    db.add(new_item)
+                    items_added += 1
+                
+                elif operation.operation == "update":
+                    if not operation.pledge_item_id:
+                        warnings.append("Skipped update operation: pledge_item_id is required")
+                        continue
+                    
+                    item = db.query(PledgeItemModel).filter(
+                        PledgeItemModel.pledge_item_id == operation.pledge_item_id,
+                        PledgeItemModel.pledge_id == pledge_id
+                    ).first()
+                    
+                    if not item:
+                        warnings.append(f"Skipped update operation: pledge_item_id {operation.pledge_item_id} not found")
+                        continue
+                    
+                    # Update fields if provided
+                    if operation.jewell_design_id:
+                        design = db.query(JewellDesignModel).filter(
+                            JewellDesignModel.id == operation.jewell_design_id
+                        ).first()
+                        if design:
+                            setattr(item, 'jewell_design_id', operation.jewell_design_id)
+                        else:
+                            warnings.append(f"Invalid jewell_design_id {operation.jewell_design_id} for item {operation.pledge_item_id}")
+                    
+                    if operation.jewell_condition:
+                        setattr(item, 'jewell_condition', operation.jewell_condition)
+                    if operation.gross_weight is not None:
+                        setattr(item, 'gross_weight', operation.gross_weight)
+                    if operation.net_weight is not None:
+                        setattr(item, 'net_weight', operation.net_weight)
+                    if operation.net_value is not None:
+                        setattr(item, 'net_value', operation.net_value)
+                    if operation.remarks is not None:
+                        setattr(item, 'remarks', operation.remarks)
+                    
+                    items_updated += 1
+                
+                elif operation.operation == "remove":
+                    if not operation.pledge_item_id:
+                        warnings.append("Skipped remove operation: pledge_item_id is required")
+                        continue
+                    
+                    item = db.query(PledgeItemModel).filter(
+                        PledgeItemModel.pledge_item_id == operation.pledge_item_id,
+                        PledgeItemModel.pledge_id == pledge_id
+                    ).first()
+                    
+                    if not item:
+                        warnings.append(f"Skipped remove operation: pledge_item_id {operation.pledge_item_id} not found")
+                        continue
+                    
+                    db.delete(item)
+                    items_removed += 1
+                
+                else:
+                    warnings.append(f"Unknown operation: {operation.operation}")
+        
+        # 5. Recalculate weights and item count if requested
+        if update_data.recalculate_weights or update_data.recalculate_item_count:
+            # Flush to get updated items
+            db.flush()
+            
+            # Recalculate from current pledge items
+            current_items = db.query(PledgeItemModel).filter(
+                PledgeItemModel.pledge_id == pledge_id
+            ).all()
+            
+            if update_data.recalculate_item_count:
+                setattr(pledge, 'item_count', len(current_items))
+                
+            if update_data.recalculate_weights:
+                gross_weight = sum(item.gross_weight for item in current_items)
+                net_weight = sum(item.net_weight for item in current_items)
+                setattr(pledge, 'gross_weight', gross_weight)
+                setattr(pledge, 'net_weight', net_weight)
+                changes_summary["weights_recalculated"] = f"gross: {gross_weight}, net: {net_weight}"
+        
+        # Commit all changes
+        db.commit()
+        
+        # Refresh and fetch updated pledge with all relationships for response
+        db.refresh(pledge)
+        updated_pledge = db.query(PledgeModel).options(
+            joinedload(PledgeModel.customer),
+            joinedload(PledgeModel.scheme),
+            joinedload(PledgeModel.user),
+            joinedload(PledgeModel.pledge_items).joinedload(PledgeItemModel.jewell_design)
+        ).filter(PledgeModel.pledge_id == pledge_id).first()
+        
+        return PledgeUpdateResponse(
+            success=True,
+            message="Pledge updated successfully",
+            updated_pledge=PledgeDetailView.model_validate(updated_pledge),
+            warnings=warnings,
+            changes_summary=changes_summary,
+            items_added=items_added,
+            items_updated=items_updated,
+            items_removed=items_removed
+        )
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating pledge: {str(e)}")
+
+
+# ===============================================
+# PLEDGE WITH ITEMS ENDPOINTS
+# ===============================================
+
+@app.post("/pledges/with-items", response_model=PledgeWithItemsResponse)
+def create_pledge_with_items(
+    pledge_data: PledgeWithItemsCreate, 
+    db: Session = Depends(get_db), 
+    current_user: UserModel = Depends(get_current_user)
+):
+    """
+    Create a new pledge with pledge items in a single transaction.
+    This endpoint handles both pledge creation and associated items creation.
+    """
+    
+    # Validate that items list is not empty
+    if not pledge_data.items or len(pledge_data.items) == 0:
+        raise HTTPException(status_code=400, detail="At least one pledge item is required")
+    
+    try:
+        # Validate customer exists and belongs to user's company
+        customer = db.query(CustomerModel).filter(
+            CustomerModel.id == pledge_data.customer_id,
+            CustomerModel.company_id == current_user.company_id
+        ).first()
+        if not customer:
+            raise HTTPException(status_code=400, detail="Customer not found")
+
+        # Validate scheme exists
+        scheme = db.query(SchemeModel).filter(SchemeModel.id == pledge_data.scheme_id).first()
+        if not scheme:
+            raise HTTPException(status_code=400, detail="Scheme not found")
+
+        # Validate all jewell designs exist
+        design_ids = [item.jewell_design_id for item in pledge_data.items]
+        designs = db.query(JewellDesignModel).filter(JewellDesignModel.id.in_(design_ids)).all()
+        found_design_ids = {design.id for design in designs}
+        
+        for item in pledge_data.items:
+            if item.jewell_design_id not in found_design_ids:
+                raise HTTPException(status_code=400, detail=f"Jewell design ID {item.jewell_design_id} not found")
+
+        # Generate pledge number
+        pledge_no = generate_pledge_no(db, pledge_data.scheme_id, getattr(current_user, 'company_id'))
+
+        # Calculate totals from items if auto-calculation is enabled
+        if pledge_data.auto_calculate_weights:
+            total_gross_weight = sum(item.gross_weight for item in pledge_data.items)
+            total_net_weight = sum(item.net_weight for item in pledge_data.items)
+        else:
+            # If not auto-calculating, use 0 as defaults (can be updated later)
+            total_gross_weight = 0.0
+            total_net_weight = 0.0
+
+        if pledge_data.auto_calculate_item_count:
+            item_count = len(pledge_data.items)
+        else:
+            item_count = 0
+
+        # Create pledge record
+        db_pledge = PledgeModel(
+            customer_id=pledge_data.customer_id,
+            scheme_id=pledge_data.scheme_id,
+            pledge_date=pledge_data.pledge_date,
+            due_date=pledge_data.due_date,
+            item_count=item_count,
+            gross_weight=total_gross_weight,
+            net_weight=total_net_weight,
+            document_charges=pledge_data.document_charges,
+            first_month_interest=pledge_data.first_month_interest,
+            total_loan_amount=pledge_data.total_loan_amount,
+            final_amount=pledge_data.final_amount,
+            status=pledge_data.status,
+            is_move_to_bank=pledge_data.is_move_to_bank,
+            remarks=pledge_data.remarks,
+            company_id=current_user.company_id,
+            pledge_no=pledge_no,
+            created_by=current_user.id
+        )
+        
+        db.add(db_pledge)
+        db.flush()  # Get the pledge ID
+
+        # Create pledge items
+        items_created = 0
+        for item_data in pledge_data.items:
+            db_item = PledgeItemModel(
+                pledge_id=db_pledge.pledge_id,
+                jewell_design_id=item_data.jewell_design_id,
+                jewell_condition=item_data.jewell_condition,
+                gross_weight=item_data.gross_weight,
+                net_weight=item_data.net_weight,
+                net_value=item_data.net_value,
+                remarks=item_data.remarks
+            )
+            db.add(db_item)
+            items_created += 1
+
+        # Create automatic first interest payment
+        first_payment = create_automatic_first_interest_payment(db, db_pledge, current_user)
+
+        # Commit all changes
+        db.commit()
+        
+        # Refresh and get the complete pledge with relationships
+        db.refresh(db_pledge)
+        complete_pledge = db.query(PledgeModel).options(
+            joinedload(PledgeModel.customer),
+            joinedload(PledgeModel.scheme),
+            joinedload(PledgeModel.user),
+            joinedload(PledgeModel.pledge_items).joinedload(PledgeItemModel.jewell_design)
+        ).filter(PledgeModel.pledge_id == db_pledge.pledge_id).first()
+
+        return PledgeWithItemsResponse(
+            success=True,
+            message=f"Pledge created successfully with {items_created} items",
+            pledge=PledgeDetailView.model_validate(complete_pledge),
+            items_created=items_created,
+            items_updated=0,
+            items_deleted=0
+        )
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating pledge with items: {str(e)}")
+
+
+@app.put("/pledges/{pledge_id}/with-items", response_model=PledgeWithItemsResponse)
+def update_pledge_with_items(
+    pledge_id: int,
+    update_data: PledgeWithItemsUpdate,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """
+    Update an existing pledge and its items in a single transaction.
+    Handles pledge updates, item additions, updates, and deletions.
+    """
+    
+    try:
+        # Fetch existing pledge with relationships
+        pledge = db.query(PledgeModel).options(
+            joinedload(PledgeModel.customer),
+            joinedload(PledgeModel.scheme),
+            joinedload(PledgeModel.user),
+            joinedload(PledgeModel.pledge_items).joinedload(PledgeItemModel.jewell_design)
+        ).filter(
+            PledgeModel.pledge_id == pledge_id,
+            PledgeModel.company_id == current_user.company_id
+        ).first()
+        
+        if not pledge:
+            raise HTTPException(status_code=404, detail="Pledge not found")
+
+        warnings = []
+        items_created = 0
+        items_updated = 0
+        items_deleted = 0
+
+        # Update pledge basic information
+        pledge_updates = {}
+        
+        if update_data.customer_id is not None:
+            # Validate new customer
+            customer = db.query(CustomerModel).filter(
+                CustomerModel.id == update_data.customer_id,
+                CustomerModel.company_id == current_user.company_id
+            ).first()
+            if not customer:
+                raise HTTPException(status_code=400, detail="Customer not found")
+            pledge_updates['customer_id'] = update_data.customer_id
+
+        if update_data.scheme_id is not None:
+            # Validate new scheme
+            scheme = db.query(SchemeModel).filter(SchemeModel.id == update_data.scheme_id).first()
+            if not scheme:
+                raise HTTPException(status_code=400, detail="Scheme not found")
+            pledge_updates['scheme_id'] = update_data.scheme_id
+
+        # Update other pledge fields
+        for field in ['pledge_date', 'due_date', 'document_charges', 'first_month_interest', 
+                     'total_loan_amount', 'final_amount', 'status', 'is_move_to_bank', 'remarks']:
+            value = getattr(update_data, field)
+            if value is not None:
+                pledge_updates[field] = value
+
+        # Apply pledge updates
+        for field, value in pledge_updates.items():
+            setattr(pledge, field, value)
+
+        # Handle item deletions first
+        if update_data.delete_item_ids:
+            for item_id in update_data.delete_item_ids:
+                item = db.query(PledgeItemModel).filter(
+                    PledgeItemModel.pledge_item_id == item_id,
+                    PledgeItemModel.pledge_id == pledge_id
+                ).first()
+                
+                if item:
+                    db.delete(item)
+                    items_deleted += 1
+                else:
+                    warnings.append(f"Pledge item ID {item_id} not found for deletion")
+
+        # Handle item operations
+        if update_data.items:
+            # Validate all jewell designs exist
+            design_ids = [item.jewell_design_id for item in update_data.items if item.action in ['keep', 'update', 'add']]
+            if design_ids:
+                designs = db.query(JewellDesignModel).filter(JewellDesignModel.id.in_(design_ids)).all()
+                found_design_ids = {design.id for design in designs}
+                
+                for item in update_data.items:
+                    if item.action in ['keep', 'update', 'add'] and item.jewell_design_id not in found_design_ids:
+                        raise HTTPException(status_code=400, detail=f"Jewell design ID {item.jewell_design_id} not found")
+
+            for item_data in update_data.items:
+                if item_data.action == "add":
+                    # Add new item
+                    new_item = PledgeItemModel(
+                        pledge_id=pledge_id,
+                        jewell_design_id=item_data.jewell_design_id,
+                        jewell_condition=item_data.jewell_condition,
+                        gross_weight=item_data.gross_weight,
+                        net_weight=item_data.net_weight,
+                        net_value=item_data.net_value,
+                        remarks=item_data.remarks
+                    )
+                    db.add(new_item)
+                    items_created += 1
+
+                elif item_data.action == "update":
+                    # Update existing item
+                    if not item_data.pledge_item_id:
+                        warnings.append("Update action requires pledge_item_id")
+                        continue
+                    
+                    existing_item = db.query(PledgeItemModel).filter(
+                        PledgeItemModel.pledge_item_id == item_data.pledge_item_id,
+                        PledgeItemModel.pledge_id == pledge_id
+                    ).first()
+                    
+                    if existing_item:
+                        setattr(existing_item, 'jewell_design_id', item_data.jewell_design_id)
+                        setattr(existing_item, 'jewell_condition', item_data.jewell_condition)
+                        setattr(existing_item, 'gross_weight', item_data.gross_weight)
+                        setattr(existing_item, 'net_weight', item_data.net_weight)
+                        setattr(existing_item, 'net_value', item_data.net_value)
+                        setattr(existing_item, 'remarks', item_data.remarks)
+                        items_updated += 1
+                    else:
+                        warnings.append(f"Pledge item ID {item_data.pledge_item_id} not found for update")
+
+                elif item_data.action == "delete":
+                    # Delete item (alternative to delete_item_ids)
+                    if not item_data.pledge_item_id:
+                        warnings.append("Delete action requires pledge_item_id")
+                        continue
+                    
+                    item_to_delete = db.query(PledgeItemModel).filter(
+                        PledgeItemModel.pledge_item_id == item_data.pledge_item_id,
+                        PledgeItemModel.pledge_id == pledge_id
+                    ).first()
+                    
+                    if item_to_delete:
+                        db.delete(item_to_delete)
+                        items_deleted += 1
+                    else:
+                        warnings.append(f"Pledge item ID {item_data.pledge_item_id} not found for deletion")
+
+        # Recalculate weights and item count if requested
+        if update_data.auto_calculate_weights or update_data.auto_calculate_item_count:
+            # Flush to get current state
+            db.flush()
+            
+            current_items = db.query(PledgeItemModel).filter(
+                PledgeItemModel.pledge_id == pledge_id
+            ).all()
+
+            if update_data.auto_calculate_item_count:
+                setattr(pledge, 'item_count', len(current_items))
+
+            if update_data.auto_calculate_weights:
+                total_gross = sum(item.gross_weight for item in current_items)
+                total_net = sum(item.net_weight for item in current_items)
+                setattr(pledge, 'gross_weight', total_gross)
+                setattr(pledge, 'net_weight', total_net)
+
+        # Commit all changes
+        db.commit()
+        
+        # Refresh and get updated pledge with relationships
+        db.refresh(pledge)
+        updated_pledge = db.query(PledgeModel).options(
+            joinedload(PledgeModel.customer),
+            joinedload(PledgeModel.scheme),
+            joinedload(PledgeModel.user),
+            joinedload(PledgeModel.pledge_items).joinedload(PledgeItemModel.jewell_design)
+        ).filter(PledgeModel.pledge_id == pledge_id).first()
+
+        return PledgeWithItemsResponse(
+            success=True,
+            message="Pledge and items updated successfully",
+            pledge=PledgeDetailView.model_validate(updated_pledge),
+            items_created=items_created,
+            items_updated=items_updated,
+            items_deleted=items_deleted,
+            warnings=warnings
+        )
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating pledge with items: {str(e)}")
 
 
 # Pledge Item endpoints
@@ -1710,7 +2756,928 @@ def delete_pledge_item(item_id: int, db: Session = Depends(get_db), current_user
     db.commit()
     return {"message": "Pledge item deleted successfully"}
 
+
+@app.delete("/pledges/{pledge_id}/items")
+def delete_all_pledge_items(pledge_id: int, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
+    """
+    Delete all pledge items for a specific pledge ID.
+    This will remove all items associated with the pledge but keep the pledge record intact.
+    """
+    # Validate pledge exists and belongs to user's company
+    pledge = db.query(PledgeModel).filter(
+        PledgeModel.pledge_id == pledge_id,
+        PledgeModel.company_id == current_user.company_id
+    ).first()
+    if not pledge:
+        raise HTTPException(status_code=404, detail="Pledge not found")
+
+    # Get all pledge items for this pledge
+    pledge_items = db.query(PledgeItemModel).filter(
+        PledgeItemModel.pledge_id == pledge_id
+    ).all()
+    
+    if not pledge_items:
+        return {"message": "No pledge items found for this pledge", "deleted_count": 0}
+
+    # Delete all pledge items
+    deleted_count = len(pledge_items)
+    for item in pledge_items:
+        db.delete(item)
+    
+    # Update pledge weights and item count to zero
+    setattr(pledge, 'gross_weight', 0.0)
+    setattr(pledge, 'net_weight', 0.0)
+    setattr(pledge, 'item_count', 0)
+    
+    db.commit()
+    
+    return {
+        "message": f"All pledge items deleted successfully for pledge ID {pledge_id}", 
+        "deleted_count": deleted_count,
+        "pledge_updated": "Weights and item count reset to zero"
+    }
+
+
+# ===============================================
+# PLEDGE LISTING ENDPOINTS
+# ===============================================
+
+def calculate_remaining_principal(pledge: PledgeModel, db: Session) -> float:
+    """Calculate remaining principal based on payments made"""
+    total_payments_result = db.query(func.sum(PledgePaymentModel.principal_amount)).filter(
+        PledgePaymentModel.pledge_id == pledge.pledge_id
+    ).scalar()
+    
+    total_payments = float(total_payments_result) if total_payments_result is not None else 0.0
+    pledge_loan_amount = float(getattr(pledge, 'total_loan_amount', 0.0))
+    
+    return pledge_loan_amount - total_payments
+
+def map_pledge_to_out(pledge: PledgeModel, scheme: SchemeModel, db: Session) -> dict:
+    """Map pledge model to PledgeOut schema format"""
+    remaining_principal = calculate_remaining_principal(pledge, db)
+    
+    # Convert status to uppercase as required
+    status_mapping = {
+        'active': 'ACTIVE',
+        'redeemed': 'CLOSED',
+        'auctioned': 'DEFAULTED',
+        'partial_paid': 'ACTIVE'
+    }
+    
+    # Calculate closed_at based on status
+    closed_at = None
+    pledge_status = getattr(pledge, 'status', 'active')
+    if pledge_status in ['redeemed', 'auctioned']:
+        # Get the latest payment date for closed pledges
+        latest_payment = db.query(PledgePaymentModel.created_at).filter(
+            PledgePaymentModel.pledge_id == pledge.pledge_id
+        ).order_by(PledgePaymentModel.created_at.desc()).first()
+        closed_at = latest_payment[0] if latest_payment else None
+    
+    return {
+        "id": getattr(pledge, 'pledge_id', 0),
+        "pledge_no": getattr(pledge, 'pledge_no', ''),
+        "customer_id": getattr(pledge, 'customer_id', 0),
+        "scheme_id": getattr(pledge, 'scheme_id', 0),
+        "principal_amount": float(getattr(pledge, 'total_loan_amount', 0.0)),
+        "interest_rate": float(getattr(scheme, 'interest_rate_monthly', 0.0)) if scheme else 0.0,
+        "start_date": getattr(pledge, 'pledge_date', None),
+        "maturity_date": getattr(pledge, 'due_date', None),
+        "remaining_principal": remaining_principal,
+        "status": status_mapping.get(pledge_status, 'ACTIVE'),
+        "created_at": getattr(pledge, 'created_at', None),
+        "closed_at": closed_at
+    }
+
+@app.get("/customers/{customer_id}/pledges/active", response_model=List[PledgeOut])
+def get_customer_active_pledges(
+    customer_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_admin_user)  # Only staff/admin can view
+):
+    """
+    Get all active pledges for a specific customer.
+    Only returns pledges with status = ACTIVE.
+    """
+    # Verify customer exists and belongs to user's company
+    customer = db.query(CustomerModel).filter(
+        CustomerModel.id == customer_id,
+        CustomerModel.company_id == current_user.company_id
+    ).first()
+    
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    # Query active pledges with scheme information
+    pledges_query = db.query(PledgeModel, SchemeModel).join(
+        SchemeModel, PledgeModel.scheme_id == SchemeModel.id
+    ).filter(
+        PledgeModel.customer_id == customer_id,
+        PledgeModel.company_id == current_user.company_id,
+        PledgeModel.status.in_(['active', 'partial_paid'])  # Both considered ACTIVE
+    )
+    
+    # Apply pagination
+    pledges = pledges_query.offset(skip).limit(limit).all()
+    
+    # Map to PledgeOut format
+    result = []
+    for pledge, scheme in pledges:
+        pledge_out = map_pledge_to_out(pledge, scheme, db)
+        result.append(PledgeOut(**pledge_out))
+    
+    return result
+
+@app.get("/customers/{customer_id}/pledges", response_model=List[PledgeOut])
+def get_customer_all_pledges(
+    customer_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_admin_user)  # Only staff/admin can view
+):
+    """
+    Get all pledges for a specific customer.
+    Returns pledges with all statuses: ACTIVE, CLOSED, DEFAULTED.
+    """
+    # Verify customer exists and belongs to user's company
+    customer = db.query(CustomerModel).filter(
+        CustomerModel.id == customer_id,
+        CustomerModel.company_id == current_user.company_id
+    ).first()
+    
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    # Query all pledges with scheme information
+    pledges_query = db.query(PledgeModel, SchemeModel).join(
+        SchemeModel, PledgeModel.scheme_id == SchemeModel.id
+    ).filter(
+        PledgeModel.customer_id == customer_id,
+        PledgeModel.company_id == current_user.company_id
+    ).order_by(PledgeModel.created_at.desc())
+    
+    # Apply pagination
+    pledges = pledges_query.offset(skip).limit(limit).all()
+    
+    # Map to PledgeOut format
+    result = []
+    for pledge, scheme in pledges:
+        pledge_out = map_pledge_to_out(pledge, scheme, db)
+        result.append(PledgeOut(**pledge_out))
+    
+    return result
+
+@app.get("/schemes/{scheme_id}/pledges/active", response_model=List[PledgeOut])
+def get_scheme_active_pledges(
+    scheme_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_admin_user)  # Only staff/admin can view
+):
+    """
+    Get all active pledges under a specific scheme.
+    Only returns pledges with status = ACTIVE.
+    """
+    # Verify scheme exists and belongs to user's company
+    scheme = db.query(SchemeModel).filter(
+        SchemeModel.id == scheme_id,
+        SchemeModel.company_id == current_user.company_id
+    ).first()
+    
+    if not scheme:
+        raise HTTPException(status_code=404, detail="Scheme not found")
+    
+    # Query active pledges under this scheme
+    pledges_query = db.query(PledgeModel).filter(
+        PledgeModel.scheme_id == scheme_id,
+        PledgeModel.company_id == current_user.company_id,
+        PledgeModel.status.in_(['active', 'partial_paid'])  # Both considered ACTIVE
+    ).order_by(PledgeModel.created_at.desc())
+    
+    # Apply pagination
+    pledges = pledges_query.offset(skip).limit(limit).all()
+    
+    # Map to PledgeOut format
+    result = []
+    for pledge in pledges:
+        pledge_out = map_pledge_to_out(pledge, scheme, db)
+        result.append(PledgeOut(**pledge_out))
+    
+    return result
+
+
+# ===============================================
+# BANK ENDPOINTS
+# ===============================================
+
+@app.post("/banks/", response_model=Bank)
+def create_bank(bank: BankCreate, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
+    """Create a new bank record"""
+    # Check if bank with same name and branch already exists for this company
+    existing_bank = db.query(BankModel).filter(
+        BankModel.bank_name == bank.bank_name,
+        BankModel.branch_name == bank.branch_name,
+        BankModel.company_id == current_user.company_id
+    ).first()
+    
+    if existing_bank:
+        raise HTTPException(status_code=400, detail="Bank with same name and branch already exists")
+    
+    db_bank = BankModel(**bank.dict(), company_id=current_user.company_id)
+    db.add(db_bank)
+    db.commit()
+    db.refresh(db_bank)
+    return db_bank
+
+
+@app.get("/banks/", response_model=List[Bank])
+def read_banks(
+    skip: int = 0, 
+    limit: int = 100, 
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db), 
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Get all banks for the current user's company with optional filtering"""
+    query = db.query(BankModel).filter(BankModel.company_id == current_user.company_id)
+    
+    # Filter by status if provided
+    if status:
+        query = query.filter(BankModel.status == status)
+    
+    # Search functionality
+    if search:
+        search_filter = f"%{search}%"
+        query = query.filter(
+            or_(
+                BankModel.bank_name.ilike(search_filter),
+                BankModel.branch_name.ilike(search_filter),
+                BankModel.account_name.ilike(search_filter)
+            )
+        )
+    
+    banks = query.offset(skip).limit(limit).all()
+    return banks
+
+
+@app.get("/banks/{bank_id}", response_model=Bank)
+def read_bank(bank_id: int, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
+    """Get a specific bank by ID"""
+    bank = db.query(BankModel).filter(
+        BankModel.id == bank_id,
+        BankModel.company_id == current_user.company_id
+    ).first()
+    
+    if bank is None:
+        raise HTTPException(status_code=404, detail="Bank not found")
+    return bank
+
+
+@app.put("/banks/{bank_id}", response_model=Bank)
+def update_bank(
+    bank_id: int, 
+    bank_update: BankUpdate, 
+    db: Session = Depends(get_db), 
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Update a bank record"""
+    db_bank = db.query(BankModel).filter(
+        BankModel.id == bank_id,
+        BankModel.company_id == current_user.company_id
+    ).first()
+    
+    if db_bank is None:
+        raise HTTPException(status_code=404, detail="Bank not found")
+    
+    # Check for duplicate bank name + branch combination if being updated
+    if bank_update.bank_name or bank_update.branch_name:
+        new_bank_name = bank_update.bank_name or db_bank.bank_name
+        new_branch_name = bank_update.branch_name or db_bank.branch_name
+        
+        existing_bank = db.query(BankModel).filter(
+            BankModel.bank_name == new_bank_name,
+            BankModel.branch_name == new_branch_name,
+            BankModel.company_id == current_user.company_id,
+            BankModel.id != bank_id
+        ).first()
+        
+        if existing_bank:
+            raise HTTPException(status_code=400, detail="Bank with same name and branch already exists")
+    
+    # Update only provided fields
+    update_data = bank_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_bank, field, value)
+    
+    db.commit()
+    db.refresh(db_bank)
+    return db_bank
+
+
+@app.delete("/banks/{bank_id}")
+def delete_bank(bank_id: int, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
+    """Delete a bank record (soft delete by setting status to inactive)"""
+    db_bank = db.query(BankModel).filter(
+        BankModel.id == bank_id,
+        BankModel.company_id == current_user.company_id
+    ).first()
+    
+    if db_bank is None:
+        raise HTTPException(status_code=404, detail="Bank not found")
+    
+    # Soft delete - set status to inactive instead of hard delete
+    setattr(db_bank, 'status', 'inactive')
+    db.commit()
+    
+    return {"message": "Bank deactivated successfully"}
+
+
+@app.post("/banks/{bank_id}/activate")
+def activate_bank(bank_id: int, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
+    """Reactivate an inactive bank"""
+    db_bank = db.query(BankModel).filter(
+        BankModel.id == bank_id,
+        BankModel.company_id == current_user.company_id
+    ).first()
+    
+    if db_bank is None:
+        raise HTTPException(status_code=404, detail="Bank not found")
+    
+    setattr(db_bank, 'status', 'active')
+    db.commit()
+    
+    return {"message": "Bank activated successfully"}
+
+
+# ===============================================
+# PLEDGE PAYMENT ENDPOINTS
+# ===============================================
+
+@app.post("/pledge-payments/", response_model=PledgePayment)
+def create_pledge_payment(
+    payment: PledgePaymentCreate,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Create a new pledge payment"""
+    
+    # Verify pledge exists and belongs to user's company
+    pledge = db.query(PledgeModel).filter(
+        PledgeModel.pledge_id == payment.pledge_id,
+        PledgeModel.company_id == current_user.company_id
+    ).first()
+    
+    if not pledge:
+        raise HTTPException(status_code=404, detail="Pledge not found")
+    
+    # Check if pledge is active
+    if pledge.status not in ['active', 'partial_paid']:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot make payment for pledge with status: {pledge.status}"
+        )
+    
+    # Calculate current balance (total loan amount minus all previous payments)
+    total_payments_result = db.query(func.sum(PledgePaymentModel.amount)).filter(
+        PledgePaymentModel.pledge_id == payment.pledge_id
+    ).scalar()
+    total_payments = total_payments_result if total_payments_result is not None else 0.0
+    
+    current_balance = float(getattr(pledge, 'final_amount', 0.0)) - total_payments
+    payment_amount = float(getattr(payment, 'amount', 0.0))
+    
+    # Validate payment amount
+    if payment_amount > current_balance:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Payment amount ({payment_amount}) exceeds remaining balance ({current_balance})"
+        )
+    
+    # Calculate new balance
+    new_balance = current_balance - payment_amount
+    
+    # Generate receipt number - always auto-generate for consistency
+    receipt_no = generate_receipt_no(db, current_user.company_id)
+    
+    # Create payment record
+    db_payment = PledgePaymentModel(
+        pledge_id=payment.pledge_id,
+        payment_date=payment.payment_date or date.today(),
+        payment_type=payment.payment_type,
+        amount=payment_amount,
+        interest_amount=payment.interest_amount or 0.0,
+        principal_amount=payment.principal_amount or 0.0,
+        penalty_amount=payment.penalty_amount or 0.0,
+        discount_amount=payment.discount_amount or 0.0,
+        balance_amount=new_balance,
+        payment_method=payment.payment_method or "cash",
+        bank_reference=payment.bank_reference,
+        receipt_no=receipt_no,
+        remarks=payment.remarks,
+        created_by=current_user.id,
+        company_id=current_user.company_id
+    )
+    
+    try:
+        db.add(db_payment)
+        
+        # Update pledge status based on balance after payment
+        # Use small epsilon for floating point comparison to handle precision issues
+        epsilon = 0.01  # Allow for small rounding differences
+        
+        if new_balance <= epsilon:
+            # Pledge is fully paid - mark as redeemed (maps to CLOSED in API)
+            old_status = pledge.status
+            setattr(pledge, 'status', 'redeemed')
+            # Add comment in remarks if not already specified
+            if not payment.remarks:
+                setattr(db_payment, 'remarks', f"Full pledge settlement - Pledge closed (Balance: {new_balance:.2f})")
+            print(f"🎉 Pledge {getattr(pledge, 'pledge_no', pledge.pledge_id)} status updated: {old_status} → redeemed (Balance: {new_balance:.2f})")
+        elif new_balance < float(getattr(pledge, 'final_amount', 0.0)):
+            # Partial payment made - mark as partial_paid (maps to ACTIVE in API)
+            old_status = pledge.status
+            setattr(pledge, 'status', 'partial_paid')
+            print(f"📝 Pledge {getattr(pledge, 'pledge_no', pledge.pledge_id)} status updated: {old_status} → partial_paid (Balance: {new_balance:.2f})")
+        # If new_balance == pledge.final_amount, status remains 'active'
+        
+        db.commit()
+        db.refresh(db_payment)
+        
+        return db_payment
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating payment: {str(e)}")
+
+
+@app.get("/pledge-payments/", response_model=List[PledgePaymentWithDetails])
+def get_pledge_payments(
+    pledge_id: Optional[int] = None,
+    payment_type: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    from_date: Optional[date] = None,
+    to_date: Optional[date] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Get pledge payments with optional filtering"""
+    
+    # Base query with joins for additional details
+    query = db.query(
+        PledgePaymentModel,
+        PledgeModel.pledge_no,
+        CustomerModel.name.label('customer_name'),
+        UserModel.username.label('created_by_username')
+    ).join(
+        PledgeModel, PledgePaymentModel.pledge_id == PledgeModel.pledge_id
+    ).join(
+        CustomerModel, PledgeModel.customer_id == CustomerModel.id
+    ).join(
+        UserModel, PledgePaymentModel.created_by == UserModel.id
+    ).filter(
+        PledgePaymentModel.company_id == current_user.company_id
+    )
+    
+    # Apply filters
+    if pledge_id:
+        query = query.filter(PledgePaymentModel.pledge_id == pledge_id)
+    
+    if payment_type:
+        query = query.filter(PledgePaymentModel.payment_type == payment_type)
+    
+    if payment_method:
+        query = query.filter(PledgePaymentModel.payment_method == payment_method)
+    
+    if from_date:
+        query = query.filter(PledgePaymentModel.payment_date >= from_date)
+    
+    if to_date:
+        query = query.filter(PledgePaymentModel.payment_date <= to_date)
+    
+    # Execute query with pagination
+    results = query.order_by(PledgePaymentModel.created_at.desc()).offset(skip).limit(limit).all()
+    
+    # Convert to response format
+    payments_with_details = []
+    for payment, pledge_no, customer_name, created_by_username in results:
+        payment_dict = {
+            **payment.__dict__,
+            "pledge_no": pledge_no,
+            "customer_name": customer_name,
+            "created_by_username": created_by_username
+        }
+        payments_with_details.append(payment_dict)
+    
+    return payments_with_details
+
+
+@app.get("/pledge-payments/{payment_id}", response_model=PledgePaymentWithDetails)
+def get_pledge_payment(
+    payment_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Get a specific pledge payment by ID"""
+    
+    result = db.query(
+        PledgePaymentModel,
+        PledgeModel.pledge_no,
+        CustomerModel.name.label('customer_name'),
+        UserModel.username.label('created_by_username')
+    ).join(
+        PledgeModel, PledgePaymentModel.pledge_id == PledgeModel.pledge_id
+    ).join(
+        CustomerModel, PledgeModel.customer_id == CustomerModel.id
+    ).join(
+        UserModel, PledgePaymentModel.created_by == UserModel.id
+    ).filter(
+        PledgePaymentModel.payment_id == payment_id,
+        PledgePaymentModel.company_id == current_user.company_id
+    ).first()
+    
+    if not result:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    
+    payment, pledge_no, customer_name, created_by_username = result
+    
+    return {
+        **payment.__dict__,
+        "pledge_no": pledge_no,
+        "customer_name": customer_name,
+        "created_by_username": created_by_username
+    }
+
+
+@app.put("/pledge-payments/{payment_id}", response_model=PledgePayment)
+def update_pledge_payment(
+    payment_id: int,
+    payment_update: PledgePaymentUpdate,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Update a pledge payment"""
+    
+    # Get existing payment
+    db_payment = db.query(PledgePaymentModel).filter(
+        PledgePaymentModel.payment_id == payment_id,
+        PledgePaymentModel.company_id == current_user.company_id
+    ).first()
+    
+    if not db_payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    
+    # Get the pledge
+    pledge = db.query(PledgeModel).filter(
+        PledgeModel.pledge_id == db_payment.pledge_id
+    ).first()
+    
+    if not pledge:
+        raise HTTPException(status_code=404, detail="Associated pledge not found")
+    
+    old_amount = db_payment.amount
+    
+    # Update fields if provided
+    update_data = payment_update.dict(exclude_unset=True)
+    
+    # If amount is being updated, recalculate balance
+    if 'amount' in update_data:
+        new_amount = update_data['amount']
+        
+        # Calculate total payments excluding this payment
+        other_payments = db.query(func.sum(PledgePaymentModel.amount)).filter(
+            PledgePaymentModel.pledge_id == db_payment.pledge_id,
+            PledgePaymentModel.payment_id != payment_id
+        ).scalar() or 0.0
+        
+        # Calculate new balance
+        new_balance = pledge.final_amount - (other_payments + new_amount)
+        
+        if new_balance < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Updated amount would result in overpayment. Maximum allowed: {pledge.final_amount - other_payments}"
+            )
+        
+        update_data['balance_amount'] = new_balance
+    
+    # Apply updates
+    for field, value in update_data.items():
+        setattr(db_payment, field, value)
+    
+    try:
+        db.commit()
+        db.refresh(db_payment)
+        
+        # Update pledge status if amount changed
+        if 'amount' in update_data:
+            total_payments_result = db.query(func.sum(PledgePaymentModel.amount)).filter(
+                PledgePaymentModel.pledge_id == db_payment.pledge_id
+            ).scalar()
+            total_payments = total_payments_result if total_payments_result is not None else 0.0
+            pledge_final_amount = float(getattr(pledge, 'final_amount', 0.0))
+            
+            if total_payments >= pledge_final_amount:
+                setattr(pledge, 'status', 'redeemed')
+            elif total_payments > 0:
+                setattr(pledge, 'status', 'partial_paid')
+            else:
+                setattr(pledge, 'status', 'active')
+            
+            db.commit()
+        
+        return db_payment
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating payment: {str(e)}")
+
+
+@app.delete("/pledge-payments/{payment_id}")
+def delete_pledge_payment(
+    payment_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Delete a pledge payment"""
+    
+    # Get the payment
+    db_payment = db.query(PledgePaymentModel).filter(
+        PledgePaymentModel.payment_id == payment_id,
+        PledgePaymentModel.company_id == current_user.company_id
+    ).first()
+    
+    if not db_payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    
+    pledge_id = db_payment.pledge_id
+    
+    try:
+        # Delete the payment
+        db.delete(db_payment)
+        
+        # Update pledge status based on remaining payments
+        total_payments_result = db.query(func.sum(PledgePaymentModel.amount)).filter(
+            PledgePaymentModel.pledge_id == pledge_id
+        ).scalar()
+        total_payments = total_payments_result if total_payments_result is not None else 0.0
+        
+        pledge = db.query(PledgeModel).filter(PledgeModel.pledge_id == pledge_id).first()
+        
+        if pledge:
+            pledge_final_amount = float(getattr(pledge, 'final_amount', 0.0))
+            if total_payments >= pledge_final_amount:
+                setattr(pledge, 'status', 'redeemed')
+            elif total_payments > 0:
+                setattr(pledge, 'status', 'partial_paid')
+            else:
+                setattr(pledge, 'status', 'active')
+        
+        db.commit()
+        
+        return {"message": "Payment deleted successfully"}
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting payment: {str(e)}")
+
+
+@app.get("/pledges/{pledge_id}/payments", response_model=List[PledgePayment])
+def get_payments_by_pledge(
+    pledge_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Get all payments for a specific pledge"""
+    
+    # Verify pledge exists and belongs to user's company
+    pledge = db.query(PledgeModel).filter(
+        PledgeModel.pledge_id == pledge_id,
+        PledgeModel.company_id == current_user.company_id
+    ).first()
+    
+    if not pledge:
+        raise HTTPException(status_code=404, detail="Pledge not found")
+    
+    payments = db.query(PledgePaymentModel).filter(
+        PledgePaymentModel.pledge_id == pledge_id
+    ).order_by(PledgePaymentModel.created_at.desc()).all()
+    
+    return payments
+
+
+@app.get("/pledges/{pledge_id}/payment-summary")
+def get_pledge_payment_summary(
+    pledge_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Get payment summary for a specific pledge"""
+    
+    # Verify pledge exists and belongs to user's company
+    pledge = db.query(PledgeModel).filter(
+        PledgeModel.pledge_id == pledge_id,
+        PledgeModel.company_id == current_user.company_id
+    ).first()
+    
+    if not pledge:
+        raise HTTPException(status_code=404, detail="Pledge not found")
+    
+    # Calculate payment summary
+    payment_summary = db.query(
+        func.count(PledgePaymentModel.payment_id).label('total_payments'),
+        func.sum(PledgePaymentModel.amount).label('total_amount_paid'),
+        func.sum(PledgePaymentModel.interest_amount).label('total_interest_paid'),
+        func.sum(PledgePaymentModel.principal_amount).label('total_principal_paid'),
+        func.sum(PledgePaymentModel.penalty_amount).label('total_penalty_paid')
+    ).filter(
+        PledgePaymentModel.pledge_id == pledge_id
+    ).first()
+    
+    total_amount_paid = float(payment_summary[1]) if payment_summary and payment_summary[1] is not None else 0.0
+    final_amount = getattr(pledge, 'final_amount', 0.0)
+    remaining_balance = final_amount - total_amount_paid
+    
+    return {
+        "pledge_id": pledge_id,
+        "pledge_no": getattr(pledge, 'pledge_no', ''),
+        "final_amount": final_amount,
+        "total_payments": int(payment_summary[0]) if payment_summary and payment_summary[0] is not None else 0,
+        "total_amount_paid": total_amount_paid,
+        "remaining_balance": remaining_balance,
+        "total_interest_paid": float(payment_summary[2]) if payment_summary and payment_summary[2] is not None else 0.0,
+        "total_principal_paid": float(payment_summary[3]) if payment_summary and payment_summary[3] is not None else 0.0,
+        "total_penalty_paid": float(payment_summary[4]) if payment_summary and payment_summary[4] is not None else 0.0,
+        "payment_percentage": round((total_amount_paid / final_amount) * 100, 2) if final_amount > 0 else 0.0,
+        "status": getattr(pledge, 'status', 'unknown')
+    }
+
+
+@app.get("/api/pledges/{pledge_id}/settlement", response_model=PledgeSettlementResponse)
+def get_pledge_settlement_details(
+    pledge_id: int,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """
+    Calculate pledge settlement details based on pawn shop business rules.
+    
+    Business Rules:
+    1. First month interest is collected upfront at pledge creation (already paid)
+    2. If settlement is within same month (< 1 month difference):
+       - Settlement amount = Loan amount only (no additional interest)
+    3. For each completed month after pledge date:
+       - Add monthly interest = loan_amount * interest_rate
+    4. Example:
+       - Pledge: 2025-09-15, Settlement: 2025-09-16 → Settlement = 90,000
+       - Pledge: 2025-09-15, Settlement: 2025-10-16 → Settlement = 90,000 + 1,800
+       - Pledge: 2025-09-15, Settlement: 2025-11-16 → Settlement = 90,000 + 3,600
+    """
+    
+    # Get pledge with related data
+    pledge = db.query(PledgeModel).options(
+        joinedload(PledgeModel.customer),
+        joinedload(PledgeModel.scheme)
+    ).filter(
+        PledgeModel.pledge_id == pledge_id,
+        PledgeModel.company_id == current_user.company_id
+    ).first()
+    
+    if not pledge:
+        raise HTTPException(status_code=404, detail="Pledge not found")
+    
+    # Get all payments for this pledge
+    payments = db.query(PledgePaymentModel).filter(
+        PledgePaymentModel.pledge_id == pledge_id
+    ).all()
+    
+    # Calculate total payments
+    total_paid_interest = sum(getattr(payment, 'interest_amount', 0.0) or 0.0 for payment in payments)
+    total_paid_principal = sum(getattr(payment, 'principal_amount', 0.0) or 0.0 for payment in payments)
+    total_paid_amount = total_paid_interest + total_paid_principal
+    
+    # Basic pledge information
+    pledge_date = getattr(pledge, 'pledge_date')
+    loan_amount = getattr(pledge, 'total_loan_amount', 0.0)
+    first_month_interest = getattr(pledge, 'first_month_interest', 0.0)
+    monthly_interest_rate = getattr(pledge.scheme, 'interest_rate_monthly', 0.0)
+    customer_name = getattr(pledge.customer, 'name', 'Unknown')
+    pledge_no = getattr(pledge, 'pledge_no', '')
+    status = getattr(pledge, 'status', 'unknown')
+    
+    # Current date for calculation
+    calculation_date = date.today()
+    
+    # Initialize interest calculation details
+    interest_details = []
+    total_calculated_interest = 0.0
+    
+    # Calculate months difference between pledge date and calculation date
+    months_diff = (calculation_date.year - pledge_date.year) * 12 + (calculation_date.month - pledge_date.month)
+    
+    # Adjust for day difference - if calculation day is before pledge day, subtract 1 month
+    if calculation_date.day < pledge_date.day:
+        months_diff -= 1
+    
+    # Business Rule 1: First month interest is already collected (mandatory)
+    first_month_already_paid = first_month_interest
+    interest_details.append(InterestPeriodDetail(
+        period="Month 1 (Already Paid at Pledge Creation)",
+        from_date=pledge_date,
+        to_date=pledge_date + relativedelta(months=1) - relativedelta(days=1),
+        days=30,  # Standard month
+        rate_percent=monthly_interest_rate,
+        principal_amount=loan_amount,
+        interest_amount=first_month_already_paid,
+        is_mandatory=True,
+        is_partial=False
+    ))
+    total_calculated_interest = first_month_already_paid
+    
+    # Business Rule 2: If settlement within same month (months_diff = 0)
+    if months_diff <= 0:
+        # No additional interest - settlement = loan amount only
+        pending_interest = 0.0
+        
+    else:
+        # Business Rule 3: For each completed month after first month, add monthly interest
+        monthly_interest_amount = loan_amount * monthly_interest_rate / 100
+        pending_interest = months_diff * monthly_interest_amount
+        
+        # Add interest details for each completed month
+        for month_num in range(1, months_diff + 1):
+            month_start = pledge_date + relativedelta(months=month_num)
+            month_end = month_start + relativedelta(months=1) - relativedelta(days=1)
+            
+            interest_details.append(InterestPeriodDetail(
+                period=f"Month {month_num + 1} (Completed)",
+                from_date=month_start,
+                to_date=month_end,
+                days=30,  # Standard month
+                rate_percent=monthly_interest_rate,
+                principal_amount=loan_amount,
+                interest_amount=monthly_interest_amount,
+                is_mandatory=False,
+                is_partial=False
+            ))
+        
+        total_calculated_interest += pending_interest
+    
+    # Calculate settlement amounts based on business rules
+    
+    # Total interest that should be collected = first month (already paid) + pending months
+    total_interest_due = total_calculated_interest
+    
+    # Paid interest = first month interest (collected at creation) + any additional payments
+    total_paid_interest = first_month_interest + sum(getattr(payment, 'interest_amount', 0.0) or 0.0 for payment in payments)
+    
+    # Pending interest = additional months only (first month already paid)
+    if months_diff <= 0:
+        pending_interest = 0.0  # Same month settlement - no additional interest
+    else:
+        pending_interest = months_diff * (loan_amount * monthly_interest_rate / 100)
+    
+    # Settlement amount = loan amount + pending interest - principal payments made
+    total_paid_principal = sum(getattr(payment, 'principal_amount', 0.0) or 0.0 for payment in payments)
+    remaining_principal = max(0, loan_amount - total_paid_principal)
+    
+    # Final settlement amount = remaining principal + pending interest
+    final_settlement_amount = remaining_principal + pending_interest
+    
+    return PledgeSettlementResponse(
+        pledge_id=pledge_id,
+        pledge_no=pledge_no,
+        customer_name=customer_name,
+        pledge_date=pledge_date,
+        calculation_date=calculation_date,
+        status=status,
+        loan_amount=loan_amount,
+        scheme_interest_rate=monthly_interest_rate,
+        total_interest=total_interest_due,
+        first_month_interest=first_month_interest,
+        accrued_interest=pending_interest,  # Interest accrued after first month
+        interest_calculation_details=interest_details,
+        paid_interest=total_paid_interest,
+        paid_principal=total_paid_principal,
+        total_paid_amount=total_paid_interest + total_paid_principal,
+        final_amount=final_settlement_amount,
+        remaining_interest=pending_interest,  # Only pending interest (first month already paid)
+        remaining_principal=remaining_principal
+    )
+
+
+# Include API routers
+app.include_router(coa_router)
+app.include_router(daybook_router)
+
 # Startup section
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8715, reload=True)

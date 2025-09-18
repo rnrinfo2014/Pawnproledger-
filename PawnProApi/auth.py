@@ -10,12 +10,21 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import User
+from config import settings
 
-SECRET_KEY = "your-secret-key-change-this"  # Change this to a secure key
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 300
+# Use configuration-based settings instead of hardcoded values
+SECRET_KEY = settings.jwt_secret_key
+ALGORITHM = settings.algorithm  
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.access_token_expire_minutes
 
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+# Enhanced password context with stronger hashing
+pwd_context = CryptContext(
+    schemes=["argon2", "pbkdf2_sha256"], 
+    deprecated="auto",
+    argon2__memory_cost=65536,  # 64 MB
+    argon2__time_cost=3,        # 3 iterations
+    argon2__parallelism=1       # 1 thread
+)
 
 class Token(BaseModel):
     access_token: str
@@ -36,6 +45,24 @@ def verify_password(plain_password, hashed_password):
 
 def get_password_hash(password):
     return pwd_context.hash(password)
+
+def validate_password(password: str) -> tuple[bool, str]:
+    """Validate password strength"""
+    if len(password) < settings.min_password_length:
+        return False, f"Password must be at least {settings.min_password_length} characters long"
+    
+    if settings.require_special_chars:
+        import re
+        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+            return False, "Password must contain at least one special character"
+        if not re.search(r'[A-Z]', password):
+            return False, "Password must contain at least one uppercase letter"
+        if not re.search(r'[a-z]', password):
+            return False, "Password must contain at least one lowercase letter"
+        if not re.search(r'\d', password):
+            return False, "Password must contain at least one number"
+    
+    return True, "Password is valid"
 
 def authenticate_user(db: Session, username: str, password: str):
     user = db.query(User).filter(User.username == username).first()
