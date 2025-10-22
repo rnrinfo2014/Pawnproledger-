@@ -1,0 +1,17 @@
+{
+  "customer_id": 3,
+  "total_payment_amount": 42899.35,
+  "payment_method": "cash",
+  "payment_date": "2024-10-15",
+  "pledge_payments": [
+    {
+      "pledge_id": 23,
+      "payment_amount": 42899.35,
+      "payment_type": "full_settlement",
+      "interest_amount": 9899.85,
+      "principal_amount": 32999.5,
+      "remarks": "Full settlement - Pledge closure for OGL-0001"
+    }
+  ],
+  "general_remarks": "Complete settlement for customer நாகராஜ் - Pledge OGL-0001 fully closed"
+}

@@ -111,8 +111,8 @@ This comprehensive documentation covers all aspects of PawnSoft, from initial se
 ### 7. [Troubleshooting Guide](TROUBLESHOOTING_GUIDE.md) 🛠️
 **Complete problem-solving reference**
 - 🚨 Common issues & solutions
-- 🔧 Maintenance procedures
-- 📊 Monitoring & alerting
+- 🔧edures
+- 📊 Monitoring & ale Maintenance procrting
 - 🆘 Emergency procedures
 - 📞 Support escalation
 - 🧪 Testing procedures
