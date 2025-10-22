@@ -45,14 +45,16 @@ if __name__ == "__main__":
     
     for config_import, app_import in import_attempts:
         try:
+            print(f"[RUN_SERVER] Attempting config import: {config_import}")
             module = __import__(config_import, fromlist=['settings'])
             settings = module.settings
             app_module = app_import
             config_found = True
-            print(f"Successfully imported config from: {config_import}")
+            print(f"[RUN_SERVER] Successfully imported config from: {config_import}")
+            print(f"[RUN_SERVER] Will use app module: {app_import}")
             break
         except ImportError as e:
-            print(f"Failed to import {config_import}: {e}")
+            print(f"[RUN_SERVER] Failed to import {config_import}: {e}")
             continue
     
     if not config_found:
