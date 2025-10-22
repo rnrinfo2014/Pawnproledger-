@@ -65,9 +65,9 @@ os.environ.setdefault("CORS_ORIGINS", os.getenv("CORS_ORIGINS", "*"))
 # Try multiple import strategies for the main app
 app = None
 import_attempts = [
-    "src.core.main",
-    "core.main",
-    "main"
+    "core.main",        # This should work since we're in /opt/render/project/src
+    "src.core.main",    # Fallback for local development
+    "main"              # Last resort
 ]
 
 for import_path in import_attempts:

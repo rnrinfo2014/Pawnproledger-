@@ -38,9 +38,9 @@ if __name__ == "__main__":
     
     # Try multiple import strategies
     import_attempts = [
-        ("src.core.config", "src.core.main:app"),
-        ("core.config", "core.main:app"),
-        ("config", "main:app"),
+        ("core.config", "core.main:app"),        # Render deployment (we're in src dir)
+        ("src.core.config", "src.core.main:app"), # Local development
+        ("config", "main:app"),                    # Last resort
     ]
     
     for config_import, app_import in import_attempts:
@@ -66,7 +66,7 @@ if __name__ == "__main__":
         environment = os.getenv("ENVIRONMENT", "production")
         
         # Try to find the main app
-        main_attempts = ["src.core.main:app", "core.main:app", "main:app"]
+        main_attempts = ["core.main:app", "src.core.main:app", "main:app"]
         app_module = None
         
         for attempt in main_attempts:
