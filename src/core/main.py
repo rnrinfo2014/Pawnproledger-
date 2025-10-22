@@ -23,11 +23,20 @@ import os
 import shutil
 from pathlib import Path
 
-from src.core.database import SessionLocal, get_db
-from src.auth.auth import authenticate_user, create_access_token, Token, get_current_user, get_current_admin_user, get_password_hash, validate_password
-from src.core.models import Company as CompanyModel, User as UserModel, MasterAccount as MasterAccountModel, VoucherMaster as VoucherMasterModel, LedgerEntry as LedgerEntryModel, Area as AreaModel, GoldSilverRate as GoldSilverRateModel, JewellDesign as JewellDesignModel, JewellCondition as JewellConditionModel, Scheme as SchemeModel, Customer as CustomerModel, Item as ItemModel, Pledge as PledgeModel, PledgeItem as PledgeItemModel, JewellType as JewellTypeModel, JewellRate as JewellRateModel, Bank as BankModel, PledgePayment as PledgePaymentModel
-from src.core.config import settings
-from src.auth.security_middleware import SecurityHeadersMiddleware, RateLimitMiddleware, SecurityLoggingMiddleware
+# Fix imports for Render deployment
+try:
+    from src.core.database import SessionLocal, get_db
+    from src.auth.auth import authenticate_user, create_access_token, Token, get_current_user, get_current_admin_user, get_password_hash, validate_password
+    from src.core.models import Company as CompanyModel, User as UserModel, MasterAccount as MasterAccountModel, VoucherMaster as VoucherMasterModel, LedgerEntry as LedgerEntryModel, Area as AreaModel, GoldSilverRate as GoldSilverRateModel, JewellDesign as JewellDesignModel, JewellCondition as JewellConditionModel, Scheme as SchemeModel, Customer as CustomerModel, Item as ItemModel, Pledge as PledgeModel, PledgeItem as PledgeItemModel, JewellType as JewellTypeModel, JewellRate as JewellRateModel, Bank as BankModel, PledgePayment as PledgePaymentModel
+    from src.core.config import settings
+    from src.auth.security_middleware import SecurityHeadersMiddleware, RateLimitMiddleware, SecurityLoggingMiddleware
+except ImportError:
+    # Fallback for Render deployment structure
+    from core.database import SessionLocal, get_db
+    from auth.auth import authenticate_user, create_access_token, Token, get_current_user, get_current_admin_user, get_password_hash, validate_password
+    from core.models import Company as CompanyModel, User as UserModel, MasterAccount as MasterAccountModel, VoucherMaster as VoucherMasterModel, LedgerEntry as LedgerEntryModel, Area as AreaModel, GoldSilverRate as GoldSilverRateModel, JewellDesign as JewellDesignModel, JewellCondition as JewellConditionModel, Scheme as SchemeModel, Customer as CustomerModel, Item as ItemModel, Pledge as PledgeModel, PledgeItem as PledgeItemModel, JewellType as JewellTypeModel, JewellRate as JewellRateModel, Bank as BankModel, PledgePayment as PledgePaymentModel
+    from core.config import settings
+    from auth.security_middleware import SecurityHeadersMiddleware, RateLimitMiddleware, SecurityLoggingMiddleware
 from src.managers.customer_coa_manager import create_customer_coa_account, update_customer_coa_account, delete_customer_coa_account, get_customer_balance, migrate_existing_customers_to_coa
 from src.managers.pledge_accounting_manager import create_complete_pledge_accounting, get_customer_balance_from_ledger, validate_pledge_accounting_balance, create_payment_accounting
 

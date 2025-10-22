@@ -8,9 +8,15 @@ from passlib.context import CryptContext
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from src.core.database import SessionLocal
-from src.core.models import User
-from src.core.config import settings
+# Fix imports for Render deployment
+try:
+    from src.core.database import SessionLocal
+    from src.core.models import User
+    from src.core.config import settings
+except ImportError:
+    from core.database import SessionLocal
+    from core.models import User
+    from core.config import settings
 
 # Use configuration-based settings instead of hardcoded values
 SECRET_KEY = settings.jwt_secret_key

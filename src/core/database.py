@@ -6,7 +6,13 @@ from sqlalchemy.orm.session import Session
 from typing import Generator
 import os
 from dotenv import load_dotenv
-from src.core.config import settings
+
+# Fix import path for Render deployment
+try:
+    from src.core.config import settings
+except ImportError:
+    # Fallback for Render deployment structure
+    from core.config import settings
 
 load_dotenv()
 
